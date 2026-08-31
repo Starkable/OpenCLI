@@ -42,11 +42,19 @@ export type ProfileRouteInput = {
   preferredContextId?: string;
   /** contextIds of currently connected extension profiles. */
   connectedContextIds: string[];
+  /**
+   * Device multi-tenant mode: require an explicit requestedContextId.
+   * Preferred defaults and single-connection auto-use are disabled.
+   */
+  requireExplicitTarget?: boolean;
 };
 
 export type ProfileRouteResult =
   | { ok: true; contextId: string; /** set when a stale preference was overridden by the only live profile */ fallbackFrom?: string }
   | { ok: false; errorCode: 'profile_disconnected' | 'profile_required' | 'extension_not_connected'; error: string; errorHint?: string };
+
+export const PROFILE_REQUIRED_DEVICE_HINT =
+  'Device credential mode requires opencli --profile <deviceId> or OPENCLI_PROFILE=<deviceId> (no silent fallback).';
 
 /**
  * Decide which extension profile serves a command. The arbiter lives with the
@@ -55,11 +63,15 @@ export type ProfileRouteResult =
  * connected profile — which keeps the documented promise "with only one
  * connected profile, OpenCLI uses it automatically" true even when a persisted
  * default outlives the extension instance it names.
+ *
+ * When requireExplicitTarget is set (device credential mode), preferred and
+ * single-connection fallback are disabled — missing requestedContextId fails.
  */
 export function resolveProfileRoute(input: ProfileRouteInput): ProfileRouteResult {
   const requested = input.requestedContextId?.trim() || undefined;
   const preferred = input.preferredContextId?.trim() || undefined;
   const connected = input.connectedContextIds;
+  const requireExplicit = input.requireExplicitTarget === true;
 
   if (requested) {
     if (connected.includes(requested)) return { ok: true, contextId: requested };
@@ -67,7 +79,19 @@ export function resolveProfileRoute(input: ProfileRouteInput): ProfileRouteResul
       ok: false,
       errorCode: 'profile_disconnected',
       error: `Browser profile "${requested}" is not connected.`,
-      errorHint: PROFILE_DISCONNECTED_HINT,
+      errorHint: requireExplicit
+        ? `${PROFILE_DISCONNECTED_HINT} In device mode the profile must match the online deviceId.`
+        : PROFILE_DISCONNECTED_HINT,
+    };
+  }
+
+  if (requireExplicit) {
+    return {
+      ok: false,
+      errorCode: 'profile_required',
+      error:
+        'Device credential mode requires an explicit browser profile (--profile / OPENCLI_PROFILE); silent fallback is disabled.',
+      errorHint: PROFILE_REQUIRED_DEVICE_HINT,
     };
   }
 

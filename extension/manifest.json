@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "OpenCLI",
   "version": "1.0.24",
-  "description": "Browser automation bridge for the OpenCLI CLI tool. Executes commands in Chrome tab leases via a local daemon.",
+  "description": "Browser automation bridge for the OpenCLI CLI tool. Executes commands in Chrome tab leases via a local or remote daemon. Optional side panel chats with cc-connect-hosted agents.",
   "permissions": [
     "debugger",
     "tabs",
@@ -11,7 +11,8 @@
     "alarms",
     "storage",
     "tabGroups",
-    "downloads"
+    "downloads",
+    "sidePanel"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -33,6 +34,9 @@
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png"
     }
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
   },
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'"

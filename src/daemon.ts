@@ -5,6 +5,18 @@
  *   CLI → HTTP POST /command → daemon → WebSocket → Extension
  *   Extension → WebSocket result → daemon → HTTP response → CLI
  *
+ * Remote modes:
+ *   Shared-token (OPENCLI_REMOTE_TOKEN only):
+ *     - Binds OPENCLI_DAEMON_BIND (default 0.0.0.0)
+ *     - Extension WS requires shared token
+ *     - Unique-active: a new hello disconnects other profiles
+ *   Device-credentials (devices.json / OPENCLI_DEVICE_REGISTRY):
+ *     - Same bind behaviour
+ *     - Extension WS requires deviceId + deviceToken
+ *     - Multiple devices may stay connected; same deviceId replaces itself
+ *     - Commands require explicit --profile / OPENCLI_PROFILE (no fallback)
+ *   HTTP /command stays loopback-only in both remote modes
+ *
  * Security (defense-in-depth against browser-based CSRF):
  *   1. Origin check — reject HTTP/WS from non chrome-extension:// origins
  *   2. Custom header — require X-OpenCLI header (browsers can't send it
@@ -17,7 +29,7 @@
  * Lifecycle:
  *   - Auto-spawned by opencli on first browser command
  *   - Persistent — stays alive until explicit shutdown, SIGTERM, or uninstall
- *   - Listens on localhost:19825
+ *   - Listens on localhost:19825 (or bind host in remote mode)
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -42,12 +54,39 @@ import {
   getSessionLeaseKey,
   isSessionLeaseCommand,
 } from './session-lease.js';
+import {
+  ERROR_NO_EXTENSION,
+  ERROR_UNIQUE_CONNECTION,
+  authenticateExtensionWs,
+  describeRemoteAuthMode,
+  getDaemonBindHost,
+  isLoopbackAddress,
+  isRemoteMode,
+  isDeviceRemoteMode,
+  isUniqueActiveRemoteMode,
+  getRemoteToken,
+} from './remote-mode.js';
+import { authenticateDevice } from './device-registry.js';
 
 const PORT = DEFAULT_DAEMON_PORT;
 if (!isIgnorableDaemonPortEnv(process.env.OPENCLI_DAEMON_PORT)) {
   log.error(unsupportedDaemonPortEnvMessage(process.env.OPENCLI_DAEMON_PORT));
   process.exit(EXIT_CODES.USAGE_ERROR);
 }
+
+const REMOTE_MODE = isRemoteMode();
+const DEVICE_MODE = isDeviceRemoteMode();
+const UNIQUE_ACTIVE = isUniqueActiveRemoteMode();
+const BIND_HOST = getDaemonBindHost();
+const REMOTE_TOKEN = getRemoteToken();
+const REMOTE_AUTH_MODE = describeRemoteAuthMode();
+
+log.info(
+  `[daemon] Auth mode=${REMOTE_AUTH_MODE}` +
+  (REMOTE_MODE
+    ? ` bind=${BIND_HOST} uniqueActive=${UNIQUE_ACTIVE} requireExplicitProfile=${DEVICE_MODE}`
+    : ''),
+);
 
 // ─── State ───────────────────────────────────────────────────────────
 
@@ -151,6 +190,7 @@ function resolveExtensionConnection(contextId?: string, preferredContextId?: str
     requestedContextId: typeof contextId === 'string' ? contextId : undefined,
     preferredContextId: typeof preferredContextId === 'string' ? preferredContextId : undefined,
     connectedContextIds: activeProfiles().map((entry) => entry.contextId),
+    requireExplicitTarget: DEVICE_MODE,
   });
   if (!route.ok) {
     return { errorCode: route.errorCode, error: route.error, ...(route.errorHint ? { errorHint: route.errorHint } : {}) };
@@ -176,8 +216,29 @@ function registerExtensionConnection(ws: WebSocket, rawContextId: unknown): Exte
   const contextId = typeof rawContextId === 'string' && rawContextId.trim()
     ? rawContextId.trim()
     : DEFAULT_CONTEXT_ID;
+
+  // Shared-token remote only: unique-active kick across profiles.
+  // Device mode keeps other devices online; same contextId still replaces below.
+  if (UNIQUE_ACTIVE) {
+    for (const [otherId, entry] of extensionProfiles.entries()) {
+      if (entry.ws === ws) continue;
+      log.warn(
+        `[daemon] Unique-active policy: closing previous extension profile "${otherId}" ` +
+        `(${ERROR_UNIQUE_CONNECTION.errorCode})`,
+      );
+      try {
+        entry.ws.send(JSON.stringify({ type: 'policy', ...ERROR_UNIQUE_CONNECTION }));
+      } catch {
+        // best-effort notify
+      }
+      entry.ws.close(4000, ERROR_UNIQUE_CONNECTION.errorCode);
+      extensionProfiles.delete(otherId);
+    }
+  }
+
   const previous = extensionProfiles.get(contextId);
   if (previous && previous.ws !== ws) {
+    log.info(`[daemon] Replacing prior connection for profile "${contextId}"`);
     previous.ws.close();
   }
   const existing = [...extensionProfiles.entries()].find(([, entry]) => entry.ws === ws);
@@ -276,7 +337,18 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   // Timing side-channels can reveal daemon presence to local processes, which
   // is an accepted risk given the daemon is loopback-only and short-lived.
   if (req.method === 'GET' && pathname === '/ping') {
-    jsonResponse(res, 200, { ok: true }, getResponseCorsHeaders(pathname, origin));
+    jsonResponse(
+      res,
+      200,
+      {
+        ok: true,
+        remoteMode: REMOTE_MODE,
+        authMode: REMOTE_AUTH_MODE,
+        uniqueActive: UNIQUE_ACTIVE,
+        requireExplicitProfile: DEVICE_MODE,
+      },
+      getResponseCorsHeaders(pathname, origin),
+    );
     return;
   }
 
@@ -287,6 +359,20 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   if (!req.headers['x-opencli']) {
     jsonResponse(res, 403, { ok: false, error: 'Forbidden: missing X-OpenCLI header' });
     return;
+  }
+
+  // Remote mode: CLI command surface stays on loopback even when WS is public.
+  if (REMOTE_MODE && pathname === '/command') {
+    const remoteAddr = req.socket.remoteAddress;
+    if (!isLoopbackAddress(remoteAddr)) {
+      log.warn(`[daemon] Rejected non-loopback /command from ${remoteAddr ?? 'unknown'}`);
+      jsonResponse(res, 403, {
+        ok: false,
+        error: 'Forbidden: /command is loopback-only in remote mode',
+        errorCode: 'command_loopback_only',
+      });
+      return;
+    }
   }
 
   if (req.method === 'GET' && pathname === '/status') {
@@ -309,6 +395,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       pid: process.pid,
       uptime,
       daemonVersion: PKG_VERSION,
+      remoteMode: REMOTE_MODE,
+      authMode: REMOTE_AUTH_MODE,
+      uniqueActive: UNIQUE_ACTIVE,
+      requireExplicitProfile: DEVICE_MODE,
       extensionConnected: !!route.connection,
       extensionVersion: route.connection?.extensionVersion ?? undefined,
       extensionCompatRange: route.connection?.extensionCompatRange ?? undefined,
@@ -321,6 +411,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       commandResultUnknown: commandResultUnknownCount,
       memoryMB: Math.round(mem.rss / 1024 / 1024 * 10) / 10,
       port: PORT,
+      bindHost: BIND_HOST,
+      ...(activeProfiles().length === 0
+        ? { noExtension: ERROR_NO_EXTENSION }
+        : {}),
     });
     return;
   }
@@ -503,12 +597,41 @@ const wss = new WebSocketServer({
     // ws://localhost:19825/ext and impersonate the Extension.  Real Chrome
     // Extensions send origin chrome-extension://<id>.
     const origin = req.headers['origin'] as string | undefined;
-    return !origin || origin.startsWith('chrome-extension://');
+    if (origin && !origin.startsWith('chrome-extension://')) {
+      return false;
+    }
+    if (REMOTE_MODE) {
+      const auth = authenticateExtensionWs(req, {
+        sharedToken: REMOTE_TOKEN,
+        deviceMode: DEVICE_MODE,
+        authenticateDevice,
+      });
+      if (!auth.ok) {
+        log.warn(`[daemon] Rejected extension WS: ${auth.errorCode} — ${auth.error}`);
+        return false;
+      }
+    }
+    return true;
   },
 });
 
-wss.on('connection', (ws: WebSocket) => {
+wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
   log.info('[daemon] Extension connected');
+
+  let authedDeviceId: string | undefined;
+  if (REMOTE_MODE) {
+    const auth = authenticateExtensionWs(req, {
+      sharedToken: REMOTE_TOKEN,
+      deviceMode: DEVICE_MODE,
+      authenticateDevice,
+    });
+    if (!auth.ok) {
+      log.warn(`[daemon] Closing extension WS after upgrade auth failure: ${auth.errorCode}`);
+      ws.close(4001, auth.errorCode);
+      return;
+    }
+    if (auth.mode === 'device') authedDeviceId = auth.deviceId;
+  }
 
   // ── Heartbeat: ping every 15s, close if 2 pongs missed ──
   let missedPongs = 0;
@@ -537,7 +660,28 @@ wss.on('connection', (ws: WebSocket) => {
 
       // Handle hello message from extension (version handshake)
       if (msg.type === 'hello') {
-        const connection = registerExtensionConnection(ws, msg.contextId);
+        let helloContextId = msg.contextId;
+        if (authedDeviceId) {
+          const reported = typeof helloContextId === 'string' ? helloContextId.trim() : '';
+          if (reported && reported !== authedDeviceId) {
+            log.warn(
+              `[daemon] Rejecting hello: contextId "${reported}" does not match authenticated deviceId "${authedDeviceId}"`,
+            );
+            try {
+              ws.send(JSON.stringify({
+                type: 'error',
+                errorCode: 'device_context_mismatch',
+                error: `hello.contextId must equal authenticated deviceId "${authedDeviceId}"`,
+              }));
+            } catch {
+              // best-effort
+            }
+            ws.close(4002, 'device_context_mismatch');
+            return;
+          }
+          helloContextId = authedDeviceId;
+        }
+        const connection = registerExtensionConnection(ws, helloContextId);
         connection.extensionVersion = typeof msg.version === 'string' ? msg.version : null;
         connection.extensionCompatRange = typeof msg.compatRange === 'string' ? msg.compatRange : null;
         connection.lastSeenAt = Date.now();
@@ -590,8 +734,13 @@ wss.on('connection', (ws: WebSocket) => {
 
 // ─── Start ───────────────────────────────────────────────────────────
 
-httpServer.listen(PORT, '127.0.0.1', () => {
-  log.info(`[daemon] Listening on http://127.0.0.1:${PORT}`);
+httpServer.listen(PORT, BIND_HOST, () => {
+  log.info(
+    `[daemon] Listening on http://${BIND_HOST}:${PORT}` +
+    (REMOTE_MODE
+      ? ` (remote auth=${REMOTE_AUTH_MODE}, uniqueActive=${UNIQUE_ACTIVE})`
+      : ''),
+  );
 });
 
 httpServer.on('error', (err: NodeJS.ErrnoException) => {

@@ -8,7 +8,7 @@
 declare const __OPENCLI_COMPAT_RANGE__: string;
 
 import type { Command, Result } from './protocol';
-import { DAEMON_HOST, DAEMON_PORT, DAEMON_WS_URL, DAEMON_PING_URL } from './protocol';
+import { loadRuntimeConfig, resolveDaemonEndpoints, saveRuntimeConfig } from './config';
 import * as executor from './cdp';
 import * as identity from './identity';
 import { executeWithJournal } from './journal';
@@ -38,6 +38,19 @@ async function getCurrentContextId(): Promise<string> {
   if (contextIdPromise) return contextIdPromise;
   contextIdPromise = (async () => {
     try {
+      const runtimeConfig = await loadRuntimeConfig();
+      const configuredDeviceId = runtimeConfig.deviceId?.trim();
+      if (runtimeConfig.mode === 'remote' && configuredDeviceId) {
+        // Device credentials mode: hello.contextId MUST equal authenticated deviceId.
+        currentContextId = configuredDeviceId;
+        try {
+          const local = chrome.storage?.local;
+          if (local) await local.set({ [CONTEXT_ID_KEY]: configuredDeviceId });
+        } catch {
+          // best-effort persist
+        }
+        return currentContextId;
+      }
       const local = chrome.storage?.local;
       if (!local) return currentContextId;
       const raw = await local.get(CONTEXT_ID_KEY) as Record<string, unknown>;
@@ -137,11 +150,14 @@ function connect(): Promise<void> {
 async function connectAttempt(): Promise<void> {
   if (isDaemonSocketActive()) return;
 
+  const runtimeConfig = await loadRuntimeConfig();
+  const { wsUrl, pingUrl } = resolveDaemonEndpoints(runtimeConfig);
+
   try {
     // omit credentials so the browser doesn't attach the localhost cookie jar —
     // a large jar can push the request past Node's default header limit and make
     // the daemon answer 431, silently wedging the connect loop forever.
-    const res = await fetch(DAEMON_PING_URL, {
+    const res = await fetch(pingUrl, {
       signal: AbortSignal.timeout(1000),
       credentials: 'omit',
     });
@@ -165,7 +181,7 @@ async function connectAttempt(): Promise<void> {
   try {
     const contextId = await getCurrentContextId();
     if (isDaemonSocketActive()) return;
-    thisWs = new WebSocket(DAEMON_WS_URL);
+    thisWs = new WebSocket(wsUrl);
     ws = thisWs;
     currentContextId = contextId;
   } catch {
@@ -175,7 +191,10 @@ async function connectAttempt(): Promise<void> {
 
   thisWs.onopen = () => {
     if (ws !== thisWs) return;
-    console.log('[opencli] Connected to daemon');
+    console.log(
+      '[opencli] Connected to daemon',
+      runtimeConfig.mode === 'remote' ? '(remote)' : '(local)',
+    );
     reconnectAttempts = 0; // Reset on successful connection
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
@@ -187,6 +206,7 @@ async function connectAttempt(): Promise<void> {
       contextId: currentContextId,
       version: chrome.runtime.getManifest().version,
       compatRange: __OPENCLI_COMPAT_RANGE__,
+      remoteMode: runtimeConfig.mode === 'remote',
     });
     // Application-level keepalive. Chrome (116+) extends the service worker's
     // lifetime on WebSocket ACTIVITY — an idle OPEN socket does not count, so
@@ -198,7 +218,13 @@ async function connectAttempt(): Promise<void> {
   thisWs.onmessage = async (event) => {
     if (ws !== thisWs) return;
     try {
-      const command = JSON.parse(event.data as string) as Command;
+      const parsed = JSON.parse(event.data as string);
+      // Server policy / control messages (not browser Commands)
+      if (parsed && typeof parsed === 'object' && parsed.type === 'policy') {
+        console.warn('[opencli] Daemon policy:', parsed.errorCode ?? parsed.message);
+        return;
+      }
+      const command = parsed as Command;
       const result = await executeWithJournal(command, handleCommand);
       // The socket may have been replaced while a long command ran. Deliver
       // the result on the freshest open socket — the daemon correlates by id,
@@ -1231,6 +1257,12 @@ function initialize(): void {
     workerRecovered = true;
   });
   void workerReady.then(() => connect());
+  // Open side panel when clicking the action icon (MV3).
+  try {
+    void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+  } catch (err) {
+    console.warn('[opencli] sidePanel.setPanelBehavior unavailable', err);
+  }
   console.log('[opencli] OpenCLI extension initialized');
 }
 
@@ -1263,7 +1295,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   await releaseLease(leaseKey, 'idle alarm');
 });
 
-// ─── Popup status API ───────────────────────────────────────────────
+// ─── Popup / Side Panel status API ───────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'getStatus') {
@@ -1271,6 +1303,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       const contextId = await getCurrentContextId();
       const connected = ws?.readyState === WebSocket.OPEN;
       const extensionVersion = chrome.runtime.getManifest().version;
+      const runtimeConfig = await loadRuntimeConfig();
       const daemonVersion = connected ? await fetchDaemonVersion() : null;
       sendResponse({
         connected,
@@ -1278,11 +1311,115 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         contextId,
         extensionVersion,
         daemonVersion,
+        mode: runtimeConfig.mode,
+        deviceId: runtimeConfig.deviceId || undefined,
+        browserChannelReady:
+          runtimeConfig.mode !== 'remote'
+          || Boolean(runtimeConfig.deviceId?.trim() && runtimeConfig.deviceToken?.trim())
+          || Boolean(runtimeConfig.remoteToken?.trim()),
+        configIncomplete:
+          runtimeConfig.mode === 'remote'
+          && !runtimeConfig.deviceId?.trim()
+          && !runtimeConfig.remoteToken?.trim(),
+        uniqueActiveHint:
+          runtimeConfig.mode === 'remote' && !runtimeConfig.deviceId?.trim()
+            ? '共享 token 远程模式：同时仅允许一个扩展连接（后连顶替先连）。多人并行请改用 deviceId + deviceToken。'
+            : runtimeConfig.mode === 'remote' && runtimeConfig.deviceId?.trim()
+              ? '设备凭证模式：多设备可并行；Agent 必须带 --profile / OPENCLI_PROFILE。'
+              : undefined,
       });
     })();
     return true;
   }
+
+  if (msg?.type === 'getRuntimeConfig') {
+    void loadRuntimeConfig().then((config) => sendResponse({ ok: true, config }));
+    return true;
+  }
+
+  if (msg?.type === 'saveRuntimeConfig') {
+    void (async () => {
+      const config = await saveRuntimeConfig(msg.patch ?? {});
+      // Invalidate cached contextId so deviceId changes take effect on reconnect.
+      contextIdPromise = null;
+      // Force reconnect with new endpoints
+      if (ws) {
+        try {
+          ws.close();
+        } catch {
+          // ignore
+        }
+        ws = null;
+      }
+      void connect();
+      sendResponse({ ok: true, config });
+    })();
+    return true;
+  }
+
+  if (msg?.type === 'reconnectDaemon') {
+    if (ws) {
+      try {
+        ws.close();
+      } catch {
+        // ignore
+      }
+      ws = null;
+    }
+    void connect();
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (msg?.type === 'bindActiveTab') {
+    void (async () => {
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        if (!tab?.id) {
+          sendResponse({
+            ok: false,
+            error: 'No active tab',
+            errorCode: 'no_active_tab',
+          });
+          return;
+        }
+        const session = typeof msg.session === 'string' && msg.session.trim()
+          ? msg.session.trim()
+          : 'sidebar';
+        const result = await handleCommand({
+          id: `sidebar_bind_${Date.now()}`,
+          action: 'bind',
+          session,
+          surface: 'browser',
+          page: String(tab.id),
+        } as Command);
+        sendResponse(result);
+      } catch (err) {
+        sendResponse({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+          errorCode: 'bind_failed',
+        });
+      }
+    })();
+    return true;
+  }
+
   return false;
+});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local' || !changes.opencliRuntimeConfig) return;
+  console.log('[opencli] Runtime config changed; reconnecting daemon socket');
+  if (ws) {
+    try {
+      ws.close();
+    } catch {
+      // ignore
+    }
+    ws = null;
+  }
+  void connect();
 });
 
 /**
@@ -1292,10 +1429,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
  */
 async function fetchDaemonVersion(): Promise<string | null> {
   try {
-    const res = await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/status`, {
+    const runtimeConfig = await loadRuntimeConfig();
+    const { pingUrl } = resolveDaemonEndpoints(runtimeConfig);
+    const statusUrl = pingUrl.replace(/\/ping$/, '/status');
+    const res = await fetch(statusUrl, {
       method: 'GET',
       headers: { 'X-OpenCLI': '1' },
       signal: AbortSignal.timeout(1500),
+      credentials: 'omit',
     });
     if (!res.ok) return null;
     const body = await res.json() as { daemonVersion?: unknown };

@@ -1,8 +1,17 @@
 # OpenCLI Browser Bridge Extension
 
-The extension connects Chrome tabs to the local OpenCLI daemon. It uses Chrome
-extension APIs only as a transport and browser-control layer for explicit CLI
-commands.
+The extension connects Chrome tabs to the local OpenCLI daemon **or** a remote
+daemon (intranet MVP). It uses Chrome extension APIs as a transport and
+browser-control layer for explicit CLI / Agent commands. An optional **Side
+Panel** talks to a cc-connect Bridge for chat while browser commands still flow
+through the daemon WebSocket.
+
+## Modes
+
+- **local** (default): `ws://localhost:19825/ext` — classic setup; install opencli on the same machine.
+- **remote**: configure daemon base URL + **deviceId/deviceToken** (multi-tenant) or shared `OPENCLI_REMOTE_TOKEN` (single-tenant compat) in the side panel; the user's machine does **not** need the opencli CLI.
+  - Multi-tenant guide: [`docs/guide/multi-tenant-device-credentials.md`](../docs/guide/multi-tenant-device-credentials.md)
+  - Original remote MVP: [`docs/guide/sidebar-remote-opencli.md`](../docs/guide/sidebar-remote-opencli.md)
 
 ## Permission Notes
 
@@ -16,6 +25,7 @@ commands.
   the CLI can wait for a file triggered by an automation command. OpenCLI
   filters by the command's filename/URL pattern and timeout, and does not modify,
   redirect, or persist browser download history.
+- `sidePanel`: Agent chat UI and connection settings.
 
 Suggested Chrome Web Store justification for `downloads`:
 

@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenCLI Side Panel</title>
+  <style>
+    :root {
+      --bg: #f7f7f8;
+      --card: #fff;
+      --border: #e5e5ea;
+      --text: #1d1d1f;
+      --muted: #86868b;
+      --accent: #0071e3;
+      --ok: #34c759;
+      --bad: #ff3b30;
+      --warn: #ff9500;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 13px;
+      color: var(--text);
+      background: var(--bg);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 12px 14px;
+      background: var(--card);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .title { font-weight: 600; font-size: 14px; flex: 1; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .dot.ok { background: var(--ok); }
+    .dot.bad { background: var(--bad); }
+    .dot.warn { background: var(--warn); }
+    .pill {
+      font-size: 11px;
+      color: var(--muted);
+      background: #f0f0f2;
+      padding: 2px 8px;
+      border-radius: 999px;
+    }
+    button, select, input, textarea {
+      font: inherit;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      background: #fff;
+    }
+    button {
+      cursor: pointer;
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+    button.secondary {
+      background: #fff;
+      color: var(--text);
+      border-color: var(--border);
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    main {
+      flex: 1;
+      overflow: auto;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .log {
+      flex: 1;
+      min-height: 180px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .composer {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 12px 14px;
+      border-top: 1px solid var(--border);
+      background: var(--card);
+    }
+    textarea { width: 100%; min-height: 72px; resize: vertical; }
+    .cfg {
+      display: none;
+      flex-direction: column;
+      gap: 8px;
+      padding: 12px 14px;
+      background: #fffbe6;
+      border-bottom: 1px solid var(--border);
+    }
+    .cfg.open { display: flex; }
+    .cfg label { font-size: 11px; color: var(--muted); }
+    .cfg input, .cfg select { width: 100%; }
+    .err { color: var(--bad); font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="row">
+      <div class="title">OpenCLI Agent</div>
+      <button type="button" class="secondary" id="btnToggleCfg">配置</button>
+    </div>
+    <div class="row">
+      <span class="dot bad" id="daemonDot"></span>
+      <span class="pill" id="daemonLabel">浏览器接线：未知</span>
+      <span class="dot bad" id="bridgeDot"></span>
+      <span class="pill" id="bridgeLabel">Agent Bridge：未连接</span>
+    </div>
+  </header>
+
+  <section class="cfg" id="cfgPanel">
+    <label>模式
+      <select id="mode">
+        <option value="local">local（本机 daemon）</option>
+        <option value="remote">remote（服务端 daemon）</option>
+      </select>
+    </label>
+    <label>Daemon Base URL（remote）
+      <input id="daemonBaseUrl" placeholder="http://10.0.0.5:19825" />
+    </label>
+    <label>Device Id（多人并行推荐，= opencli device issue）
+      <input id="deviceId" placeholder="例如 devalpha" autocomplete="off" />
+    </label>
+    <label>Device Token
+      <input id="deviceToken" type="password" autocomplete="off" />
+    </label>
+    <label>Remote Token（仅共享 token 单租户兼容；有 Device 凭证时可留空）
+      <input id="remoteToken" type="password" autocomplete="off" />
+    </label>
+    <label>cc-connect Bridge WS URL
+      <input id="bridgeUrl" placeholder="ws://10.0.0.5:9810/bridge/ws" />
+    </label>
+    <label>Bridge Token
+      <input id="bridgeToken" type="password" autocomplete="off" />
+    </label>
+    <label class="row">
+      <input type="checkbox" id="preferBindActiveTab" checked />
+      发任务前绑定当前前台 tab（session=sidebar）
+    </label>
+    <div class="row">
+      <button type="button" id="btnSaveCfg">保存并重连</button>
+      <button type="button" class="secondary" id="btnReconnect">仅重连接线</button>
+    </div>
+    <div class="err" id="cfgError"></div>
+  </section>
+
+  <main>
+    <div class="log" id="log"></div>
+  </main>
+
+  <div class="composer">
+    <textarea id="input" placeholder="输入任务，发送到服务端 Agent（cc-connect Bridge）…"></textarea>
+    <div class="row">
+      <button type="button" id="btnSend">发送</button>
+      <button type="button" class="secondary" id="btnStop">停止</button>
+      <button type="button" class="secondary" id="btnBind">绑定当前 Tab</button>
+    </div>
+    <div class="err" id="sendError"></div>
+  </div>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

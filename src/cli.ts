@@ -34,6 +34,7 @@ import { buildHtmlTreeJs, type HtmlTreeResult } from './browser/html-tree.js';
 import { buildExtractHtmlJs, runExtractFromHtml } from './browser/extract.js';
 import { analyzeSite, type PageSignals } from './browser/analyze.js';
 import { registerAuthCommands } from './commands/auth.js';
+import { registerDeviceCommands } from './commands/device.js';
 import { daemonRestart, daemonStatus, daemonStop } from './commands/daemon.js';
 import { log } from './logger.js';
 import { bindTab, BrowserCommandError, sendCommand } from './browser/daemon-client.js';
@@ -958,6 +959,7 @@ export function createProgram(BUILTIN_CLIS: string, USER_CLIS: string): Command 
     });
 
   const authCmd = registerAuthCommands(program);
+  registerDeviceCommands(program);
 
   program
     .command('convention-audit')
