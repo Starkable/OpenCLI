@@ -107,7 +107,6 @@ async function loadConfigIntoForm() {
   document.getElementById('remoteToken').value = c.remoteToken || '';
   document.getElementById('bridgeUrl').value = c.bridgeUrl || '';
   document.getElementById('bridgeToken').value = c.bridgeToken || '';
-  document.getElementById('bridgeProject').value = c.bridgeProject || '';
   document.getElementById('preferBindActiveTab').checked = c.preferBindActiveTab !== false;
   applySessionIdentity(c);
 }
@@ -121,7 +120,6 @@ function readFormConfig() {
     remoteToken: document.getElementById('remoteToken').value,
     bridgeUrl: document.getElementById('bridgeUrl').value.trim(),
     bridgeToken: document.getElementById('bridgeToken').value,
-    bridgeProject: document.getElementById('bridgeProject').value.trim(),
     preferBindActiveTab: document.getElementById('preferBindActiveTab').checked,
   };
 }
@@ -164,7 +162,7 @@ function connectBridge(config) {
   bridgeWs = ws;
 
   ws.onopen = () => {
-    const reg = {
+    ws.send(JSON.stringify({
       type: 'register',
       platform: PLATFORM,
       capabilities: ['text', 'preview', 'typing'],
@@ -174,10 +172,7 @@ function connectBridge(config) {
         description: 'OpenCLI browser side panel',
         device_id: config.deviceId || undefined,
       },
-    };
-    const project = (config.bridgeProject || '').trim();
-    if (project) reg.project = project;
-    ws.send(JSON.stringify(reg));
+    }));
   };
 
   ws.onmessage = (ev) => {
@@ -210,10 +205,7 @@ function handleBridgeMessage(msg, ws) {
       if (msg.ok) {
         bridgeRegistered = true;
         setBridgeStatus('connected');
-        const proj = (document.getElementById('bridgeProject')?.value || '').trim();
-        appendLog(
-          `已注册到 cc-connect Bridge（session=${sessionKey}${proj ? `, project=${proj}` : ''}）`,
-        );
+        appendLog(`已注册到 cc-connect Bridge（session=${sessionKey}）`);
       } else {
         bridgeRegistered = false;
         setBridgeStatus('error', msg.error || 'register rejected');
@@ -302,7 +294,7 @@ async function sendTask() {
   msgSeq += 1;
   const msgId = `sp-${Date.now()}-${msgSeq}`;
   const replyCtx = msgId;
-  const payload = {
+  bridgeWs.send(JSON.stringify({
     type: 'message',
     msg_id: msgId,
     session_key: sessionKey,
@@ -310,10 +302,7 @@ async function sendTask() {
     chat_id: sessionUserId,
     content,
     reply_ctx: replyCtx,
-  };
-  const project = (config.bridgeProject || '').trim();
-  if (project) payload.project = project;
-  bridgeWs.send(JSON.stringify(payload));
+  }));
   appendLog(`你: ${text}`);
   document.getElementById('input').value = '';
 }
@@ -325,22 +314,15 @@ function stopTask() {
   }
   msgSeq += 1;
   const msgId = `sp-stop-${Date.now()}`;
-  void (async () => {
-    const cfgRes = await sendMsg('getRuntimeConfig');
-    const config = cfgRes?.config || {};
-    const payload = {
-      type: 'message',
-      msg_id: msgId,
-      session_key: sessionKey,
-      user_id: sessionUserId,
-      chat_id: sessionUserId,
-      content: '/stop',
-      reply_ctx: msgId,
-    };
-    const project = (config.bridgeProject || '').trim();
-    if (project) payload.project = project;
-    bridgeWs.send(JSON.stringify(payload));
-  })();
+  bridgeWs.send(JSON.stringify({
+    type: 'message',
+    msg_id: msgId,
+    session_key: sessionKey,
+    user_id: sessionUserId,
+    chat_id: sessionUserId,
+    content: '/stop',
+    reply_ctx: msgId,
+  }));
   appendLog('已发送 /stop');
 }
 
@@ -367,10 +349,6 @@ document.getElementById('btnSaveCfg').addEventListener('click', async () => {
         cfgError.textContent = '填写了 deviceToken 时必须同时填写 deviceId';
         return;
       }
-    }
-    if (patch.bridgeUrl && !patch.bridgeProject) {
-      cfgError.textContent = '已配置 Bridge URL 时请填写 cc-connect Project 名称（多项目环境必填）';
-      return;
     }
     const res = await sendMsg('saveRuntimeConfig', { patch });
     if (!res?.ok) {

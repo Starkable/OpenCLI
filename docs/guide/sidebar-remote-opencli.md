@@ -58,6 +58,8 @@ opencli browser sidebar state
 
 ### cc-connect 示例（Chat）
 
+独立 work_dir 与专用 project 完整示例见 [`sidebar-cc-connect-project.zh-CN.md`](./sidebar-cc-connect-project.zh-CN.md)。
+
 ```toml
 [bridge]
 enabled = true
@@ -66,12 +68,12 @@ token = "bridge-secret"
 path = "/bridge/ws"
 
 [[projects]]
-name = "browser-agent"
-# admin / allow lists as needed
+name = "opencli-sidebar"
 
 [projects.agent]
-type = "cursor"   # or "claudecode"; Pi Agent later via adapter
-# YOLO / force mode recommended for unattended sidebar
+type = "claudecode"   # or "cursor"; Pi Agent later via adapter
+# work_dir = "/home/workspace/opencli-sidebar"
+# mode = "yolo"
 ```
 
 侧边栏作为 Bridge 外部 adapter：`platform=opencli-sidebar`，capabilities 含 `text` / `preview` / `typing`。
@@ -87,6 +89,7 @@ type = "cursor"   # or "claudecode"; Pi Agent later via adapter
    - Remote Token：与 `OPENCLI_REMOTE_TOKEN` 相同
    - Bridge WS URL：`ws://<server>:9810/bridge/ws`
    - Bridge Token：与 cc-connect `[bridge].token` 相同
+   - **cc-connect Project 名称**：与专用 `[[projects]].name` 一致（多项目必填，如 `opencli-sidebar`）
 3. 保存并重连；确认「浏览器接线」「Agent Bridge」均为已连接。
 4. （可选）发任务前自动 `bind` 当前前台 tab，session 名 `sidebar`。
 

@@ -23,6 +23,8 @@ export interface ExtensionRuntimeConfig {
   bridgeUrl: string;
   /** cc-connect Bridge token */
   bridgeToken: string;
+  /** cc-connect [[projects]].name — required when multiple projects exist */
+  bridgeProject: string;
   /** When sending a side-panel task, prefer binding the active tab first */
   preferBindActiveTab: boolean;
 }
@@ -35,6 +37,7 @@ export const DEFAULT_RUNTIME_CONFIG: ExtensionRuntimeConfig = {
   deviceToken: '',
   bridgeUrl: '',
   bridgeToken: '',
+  bridgeProject: '',
   preferBindActiveTab: true,
 };
 
