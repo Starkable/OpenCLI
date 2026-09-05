@@ -241,6 +241,24 @@ describe('daemon-client', () => {
     expect(ids[0]).not.toBe(ids[1]);
   });
 
+  it('propagates the sidebar bound-only target policy from the project environment', async () => {
+    vi.stubEnv('OPENCLI_TARGET_POLICY', 'bound-only');
+    vi.stubEnv('OPENCLI_BROWSER_SESSION', 'sidebar');
+    vi.mocked(fetch).mockResolvedValue({
+      status: 200,
+      json: () => Promise.resolve({ id: 'server', ok: true, data: 'ok' }),
+    } as Response);
+
+    await sendCommand('exec', { code: 'document.title', session: 'agent-invented-session' });
+
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body)) as {
+      targetPolicy?: string;
+      session?: string;
+    };
+    expect(body.targetPolicy).toBe('bound-only');
+    expect(body.session).toBe('sidebar');
+  });
+
   it('attaches the run context (runId/command/access) to every command as a lease heartbeat', async () => {
     vi.mocked(fetch).mockResolvedValue({
       status: 200,

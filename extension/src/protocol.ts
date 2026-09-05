@@ -29,6 +29,8 @@ export interface Command {
   code?: string;
   session?: string;
   surface?: 'browser' | 'adapter';
+  /** Restrict the command to an existing user-bound tab; never create an owned tab. */
+  targetPolicy?: 'bound-only';
   siteSession?: 'ephemeral' | 'persistent';
   url?: string;
   op?: 'list' | 'new' | 'close' | 'select';

@@ -53,8 +53,15 @@ opencli browser sidebar state
 
 ```bash
 export OPENCLI_PROFILE=<deviceId>
+export OPENCLI_BROWSER_SESSION=sidebar
+export OPENCLI_TARGET_POLICY=bound-only
 opencli browser sidebar state
 ```
+
+这三个维度含义不同：`OPENCLI_PROFILE` 选择哪台浏览器设备，
+`OPENCLI_BROWSER_SESSION=sidebar` 选择设备里的侧栏会话，
+`OPENCLI_TARGET_POLICY=bound-only` 强制只使用用户已绑定的标签且禁止静默创建标签/窗口。
+共享 token 或本机模式可以省略 `OPENCLI_PROFILE`，但侧栏 Agent project 仍应设置后两个变量。
 
 ### cc-connect 示例（Chat）
 
@@ -91,7 +98,16 @@ type = "claudecode"   # or "cursor"; Pi Agent later via adapter
    - Bridge Token：与 cc-connect `[bridge].token` 相同
    - **cc-connect Project 名称**：与专用 `[[projects]].name` 一致（多项目必填，如 `opencli-sidebar`）
 3. 保存并重连；确认「浏览器接线」「Agent Bridge」均为已连接。
-4. （可选）发任务前自动 `bind` 当前前台 tab，session 名 `sidebar`。
+4. 在希望操作的普通 `http(s)` 页面点击“绑定当前标签”（首次发送也会自动绑定一次）。
+5. 绑定后可自由切换到其他标签；后续消息继续操作原标签，直到手动重新绑定、解除绑定，或原标签被关闭/变为不可调试页面。
+
+侧栏目标会显示 `BOUND / BUSY / BROKEN`。`BUSY` 期间不允许重新绑定或解除绑定；
+任务完成或发送 `/stop` 后恢复。Side Panel 关闭再打开时，目标和最近消息会从扩展后台恢复。
+
+`bound-only` 下允许页面内的 state/click/type/select/navigate/screenshot/network 等操作；
+`tab new/select/close`、窗口关闭会返回 `bound_tab_mutation_blocked`，没有有效绑定返回
+`bound_target_required`。需要自建标签的 Browser/Cookie/Intercept/UI Adapter 会返回
+`adapter_requires_owned_tab`，请改用普通 CLI 工作流执行，侧栏不会偷偷新建标签。
 
 本机**不需要**安装 opencli CLI。
 
@@ -120,6 +136,10 @@ type = "claudecode"   # or "cursor"; Pi Agent later via adapter
 1. 扩展配置改回 `mode=local`（连本机 `localhost:19825`）。
 2. 服务端取消 `OPENCLI_REMOTE_TOKEN`，daemon 恢复仅 loopback。
 3. 停止 cc-connect Bridge 或清空侧边栏 Bridge URL。
+
+若只回滚 sticky target：部署上一版扩展（旧版 `preferBindActiveTab` 每次发送前重新绑定），
+并从侧栏 Agent project 移除 `OPENCLI_BROWSER_SESSION`、`OPENCLI_TARGET_POLICY`。
+普通 CLI 的 owned session 未使用 `bound-only`，不受该回滚影响。
 
 双模并存：同一扩展可通过配置在 local / remote 间切换，无需卸装。
 

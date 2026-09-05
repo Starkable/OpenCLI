@@ -677,6 +677,8 @@ function getBrowserSession(command?: Command): string {
   // argv to insert `--session <name>` before commander parses it; this helper
   // reads back the rewritten flag.
   const raw = getCommandOption(command, 'session');
+  const configured = process.env.OPENCLI_BROWSER_SESSION?.trim();
+  if (configured) return configured;
   if (typeof raw === 'string' && raw.trim()) return raw.trim();
   throw new Error('<session> is a required positional argument: opencli browser <session> <command>');
 }

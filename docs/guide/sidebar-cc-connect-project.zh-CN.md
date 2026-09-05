@@ -42,6 +42,10 @@ model = "sonnet"
 
 [projects.agent.providers.env]
 IS_SANDBOX = "1"
+OPENCLI_BROWSER_SESSION = "sidebar"
+OPENCLI_TARGET_POLICY = "bound-only"
+# 设备凭证模式必须设置为本项目对应设备；共享 token / local 模式可省略
+# OPENCLI_PROFILE = "alice"
 
 # 注意：此处 intentionally 没有 [[projects.platforms]]
 # 侧边栏用户通过 Chrome 扩展 + Bridge 接入，不走飞书机器人
@@ -81,3 +85,7 @@ ss -tlnp | grep 9810
 ```
 
 Side Panel 发消息应进入 `opencli-sidebar` 项目，Agent 在 `/home/workspace/opencli-sidebar` 工作。
+
+验证时先在侧栏固定一个普通网页标签，再切换到另一个标签发送命令。Agent 必须继续操作
+原标签且不新建标签。若工具返回 `adapter_requires_owned_tab`，说明所用 Adapter 依赖自建标签，
+应改到普通 CLI project 执行；不要移除 `bound-only` 来绕过保护。

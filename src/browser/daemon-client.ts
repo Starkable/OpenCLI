@@ -207,6 +207,8 @@ export interface DaemonCommand {
   code?: string;
   session?: string;
   surface?: 'browser' | 'adapter';
+  /** Restrict execution to an existing user-bound tab. */
+  targetPolicy?: 'bound-only';
   /** Adapter site session lifecycle. Persistent site sessions do not idle-expire. */
   siteSession?: 'ephemeral' | 'persistent';
   url?: string;
@@ -340,6 +342,14 @@ async function sendCommandRaw(
   const contextId = routing.contextId;
   const preferredContextId = routing.preferredContextId;
   const windowMode = params.windowMode ?? envWindowMode;
+  const envTargetPolicy = process.env.OPENCLI_TARGET_POLICY === 'bound-only'
+    ? 'bound-only' as const
+    : undefined;
+  const targetPolicy = params.targetPolicy ?? envTargetPolicy;
+  const configuredBrowserSession = process.env.OPENCLI_BROWSER_SESSION?.trim();
+  const session = targetPolicy === 'bound-only' && configuredBrowserSession
+    ? configuredBrowserSession
+    : params.session;
 
   let id = generateId();
   let ensureUsed = false;
@@ -381,6 +391,8 @@ async function sendCommandRaw(
       ...(contextId && { contextId }),
       ...(preferredContextId && { preferredContextId }),
       ...(windowMode && { windowMode }),
+      ...(targetPolicy && { targetPolicy }),
+      ...(session && { session }),
       // Carry the run identity so the daemon can acquire/refresh the write
       // lease on the persistent site session. The same runId across every exec
       // of one command is the heartbeat that keeps a long-running holder alive.

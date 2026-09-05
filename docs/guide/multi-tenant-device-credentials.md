@@ -84,6 +84,17 @@ opencli browser sidebar state
 2. 将 [`scripts/opencli-with-profile.mjs`](../../scripts/opencli-with-profile.mjs) 放在 Agent PATH 前，强制无 profile 即退出；真实二进制用 `OPENCLI_REAL_BIN` 指向。
 3. 侧边栏会在消息前加 `[opencli-device:<id>]` 提示；**不可**作为唯一防串台手段，必须以 env/`--profile` 为准。
 
+每设备侧栏 project 还必须固定浏览器会话和目标策略：
+
+```bash
+export OPENCLI_PROFILE=alice
+export OPENCLI_BROWSER_SESSION=sidebar
+export OPENCLI_TARGET_POLICY=bound-only
+```
+
+`PROFILE` 防止跨设备串台；`BROWSER_SESSION` 与 `TARGET_POLICY` 防止同一设备内因 Agent
+生成临时 session 而创建新标签。这两层约束不能互相替代。
+
 ## 与共享 token MVP 对比
 
 | | 共享 token MVP | 设备凭证 |

@@ -30,6 +30,21 @@ Until `doctor` is green, nothing else will work. Typical failures: Chrome not ru
 - `opencli browser <session> bind` binds the Chrome tab you already have open to that session. Use this for logged-in pages, SSO flows, or pages you manually positioned before handing control to the agent.
 - `--window foreground|background` (or `OPENCLI_WINDOW=foreground|background`) chooses whether OpenCLI creates/focuses a foreground browser window or uses a background browser window for owned sessions.
 
+### Sidebar sticky-target mode
+
+When `OPENCLI_TARGET_POLICY=bound-only` is present, this is a browser-initiated
+Side Panel workflow. Always use the session from `OPENCLI_BROWSER_SESSION`
+(normally `sidebar`), even if the conversation suggests a temporary session name.
+The extension has already captured the user's explicit `tabId + windowId`; do
+not run `bind`, `tab new`, `tab select`, `tab close`, or `browser close`.
+
+Operate the bound page with `state`, `find`, `click`, `type`, `fill`, `select`,
+`navigate`, `screenshot`, and `network`. If there is no valid target, surface
+`bound_target_required` and ask the user to bind again. If an adapter returns
+`adapter_requires_owned_tab`, explain that it must run in a normal owned-session
+CLI workflow; never retry by dropping the target policy. Keep `OPENCLI_PROFILE`
+when present because it selects the device independently of the browser session.
+
 ### Bind Tab
 
 ```bash

@@ -8,7 +8,12 @@
 declare const __OPENCLI_COMPAT_RANGE__: string;
 
 import type { Command, Result } from './protocol';
-import { loadRuntimeConfig, resolveDaemonEndpoints, saveRuntimeConfig } from './config';
+import {
+  loadRuntimeConfig,
+  resolveDaemonEndpoints,
+  saveRuntimeConfig,
+  type ExtensionRuntimeConfig,
+} from './config';
 import * as executor from './cdp';
 import * as identity from './identity';
 import { executeWithJournal } from './journal';
@@ -298,6 +303,410 @@ function scheduleReconnect(): void {
     reconnectTimer = null;
     void connect();
   }, delay);
+}
+
+// ─── cc-connect Agent Bridge ─────────────────────────────────────────
+// Chrome may freeze or destroy a hidden side-panel page. Keep this socket in
+// the service worker so tasks survive tab changes, and buffer replies for the
+// next side-panel instance to replay.
+
+const AGENT_BRIDGE_PLATFORM = 'opencli-sidebar';
+const AGENT_BRIDGE_EVENT_LIMIT = 200;
+const AGENT_BRIDGE_KEEPALIVE_MS = 20_000;
+type AgentBridgeState = 'connected' | 'connecting' | 'disconnected' | 'error';
+type AgentBridgeEvent = { seq: number; message: Record<string, unknown> };
+type SidebarTargetStatus = 'unbound' | 'bound' | 'busy' | 'broken';
+type SidebarTarget = {
+  status: SidebarTargetStatus;
+  tabId: number | null;
+  windowId: number | null;
+  title: string;
+  url: string;
+  bindingEpoch: number;
+  taskId: string | null;
+  taskBindingEpoch: number | null;
+  errorCode?: string;
+  error?: string;
+};
+
+const SIDEBAR_RUNTIME_STATE_KEY = 'opencli_sidebar_runtime_v1';
+const emptySidebarTarget = (): SidebarTarget => ({
+  status: 'unbound',
+  tabId: null,
+  windowId: null,
+  title: '',
+  url: '',
+  bindingEpoch: 0,
+  taskId: null,
+  taskBindingEpoch: null,
+});
+
+let agentBridgeWs: WebSocket | null = null;
+let agentBridgeRegistered = false;
+let agentBridgeState: AgentBridgeState = 'disconnected';
+let agentBridgeDetail = '';
+let agentBridgeConfigSignature = '';
+let agentBridgeReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let agentBridgeReconnectAttempts = 0;
+let agentBridgeKeepaliveTimer: ReturnType<typeof setInterval> | null = null;
+let agentBridgeGeneration = 0;
+let agentBridgeEventSeq = 0;
+const agentBridgeEvents: AgentBridgeEvent[] = [];
+let sidebarTarget: SidebarTarget = emptySidebarTarget();
+
+function persistSidebarRuntimeState(): void {
+  try {
+    void chrome.storage?.session?.set?.({
+      [SIDEBAR_RUNTIME_STATE_KEY]: {
+        target: sidebarTarget,
+        eventSeq: agentBridgeEventSeq,
+        events: agentBridgeEvents,
+      },
+    })?.catch?.(() => {});
+  } catch {
+    // Best-effort: in-memory state remains authoritative for this worker.
+  }
+}
+
+function notifySidebarTarget(): void {
+  notifySidePanel({ type: 'sidebarTargetStatus', target: sidebarTarget });
+}
+
+function setSidebarTarget(next: SidebarTarget): void {
+  sidebarTarget = next;
+  persistSidebarRuntimeState();
+  notifySidebarTarget();
+}
+
+async function recoverSidebarRuntimeState(): Promise<void> {
+  try {
+    const raw = await chrome.storage.session.get([SIDEBAR_RUNTIME_STATE_KEY]) as Record<string, unknown>;
+    const stored = raw?.[SIDEBAR_RUNTIME_STATE_KEY] as {
+      target?: SidebarTarget;
+      eventSeq?: number;
+      events?: AgentBridgeEvent[];
+    } | undefined;
+    if (Array.isArray(stored?.events)) {
+      agentBridgeEvents.splice(0, agentBridgeEvents.length, ...stored.events.slice(-AGENT_BRIDGE_EVENT_LIMIT));
+      agentBridgeEventSeq = Math.max(
+        Number(stored.eventSeq) || 0,
+        ...agentBridgeEvents.map((event) => Number(event.seq) || 0),
+      );
+    }
+    if (stored?.target && typeof stored.target.bindingEpoch === 'number') {
+      sidebarTarget = { ...emptySidebarTarget(), ...stored.target };
+    }
+    if (sidebarTarget.tabId !== null) {
+      try {
+        const tab = await chrome.tabs.get(sidebarTarget.tabId);
+        if (!isDebuggableUrl(tab.url) || tab.windowId !== sidebarTarget.windowId) {
+          throw new Error('Target is no longer debuggable');
+        }
+        sidebarTarget = {
+          ...sidebarTarget,
+          status: sidebarTarget.status === 'busy' ? 'busy' : 'bound',
+          title: tab.title ?? '',
+          url: tab.url ?? '',
+        };
+      } catch {
+        sidebarTarget = {
+          ...sidebarTarget,
+          status: 'broken',
+          taskId: null,
+          taskBindingEpoch: null,
+          errorCode: 'bound_tab_gone',
+          error: '绑定标签已关闭或不可调试，请重新绑定。',
+        };
+      }
+    }
+  } catch {
+    sidebarTarget = emptySidebarTarget();
+  }
+  persistSidebarRuntimeState();
+}
+
+async function bindSidebarTarget(tabId: unknown, windowId: unknown): Promise<Result> {
+  if (sidebarTarget.status === 'busy') {
+    return {
+      id: 'sidebar_bind', ok: false, errorCode: 'sidebar_target_busy',
+      error: '当前任务仍在执行，停止任务后才能重新绑定。',
+    };
+  }
+  if (!Number.isInteger(tabId) || !Number.isInteger(windowId)) {
+    return { id: 'sidebar_bind', ok: false, errorCode: 'bound_tab_not_found', error: '缺少明确的目标标签。' };
+  }
+  let tab: chrome.tabs.Tab;
+  try {
+    tab = await chrome.tabs.get(tabId as number);
+  } catch {
+    return { id: 'sidebar_bind', ok: false, errorCode: 'bound_tab_not_found', error: '目标标签已不存在。' };
+  }
+  if (tab.windowId !== windowId) {
+    return {
+      id: 'sidebar_bind', ok: false, errorCode: 'bound_tab_window_mismatch',
+      error: '目标标签不属于发起绑定的浏览器窗口。',
+    };
+  }
+  if (!isDebuggableUrl(tab.url)) {
+    return {
+      id: 'sidebar_bind', ok: false, errorCode: 'bound_tab_not_debuggable',
+      error: `当前页面不可调试：${tab.url ?? 'unknown URL'}`,
+      errorHint: '请切换到 http(s) 页面后重新绑定。',
+    };
+  }
+
+  const leaseKey = getLeaseKey('sidebar', 'browser');
+  const existing = automationSessions.get(leaseKey);
+  if (existing?.owned) await releaseLease(leaseKey, 'sidebar explicit bind');
+  else if (existing && existing.preferredTabId !== null && existing.preferredTabId !== tab.id) {
+    await executor.detach(existing.preferredTabId).catch(() => {});
+  }
+  setLeaseSession(leaseKey, {
+    session: 'sidebar', surface: 'browser', kind: 'bound',
+    windowId: tab.windowId, owned: false, preferredTabId: tab.id!,
+  });
+  setSidebarTarget({
+    status: 'bound', tabId: tab.id!, windowId: tab.windowId,
+    title: tab.title ?? '', url: tab.url ?? '',
+    bindingEpoch: sidebarTarget.bindingEpoch + 1, taskId: null, taskBindingEpoch: null,
+  });
+  console.log(`[opencli] Sidebar target bound to tab ${tab.id} (epoch=${sidebarTarget.bindingEpoch}, url=${tab.url})`);
+  return pageScopedResult('sidebar_bind', tab.id!, { target: sidebarTarget });
+}
+
+async function unbindSidebarTarget(): Promise<Result> {
+  if (sidebarTarget.status === 'busy') {
+    return {
+      id: 'sidebar_unbind', ok: false, errorCode: 'sidebar_target_busy',
+      error: '当前任务仍在执行，停止任务后才能解除绑定。',
+    };
+  }
+  await releaseLease(getLeaseKey('sidebar', 'browser'), 'sidebar explicit unbind');
+  setSidebarTarget({ ...emptySidebarTarget(), bindingEpoch: sidebarTarget.bindingEpoch + 1 });
+  console.log(`[opencli] Sidebar target unbound (epoch=${sidebarTarget.bindingEpoch})`);
+  return { id: 'sidebar_unbind', ok: true, data: { target: sidebarTarget } };
+}
+
+function bridgeWsUrl(base: string, token: string): string {
+  const url = new URL(base);
+  if (token) url.searchParams.set('token', token);
+  return url.toString();
+}
+
+function notifySidePanel(payload: unknown): void {
+  try {
+    const result = chrome.runtime.sendMessage?.(payload);
+    void result?.catch?.(() => {});
+  } catch {
+    // The side panel is normally absent while a task runs in the background.
+  }
+}
+
+function setAgentBridgeState(state: AgentBridgeState, detail = ''): void {
+  agentBridgeState = state;
+  agentBridgeDetail = detail;
+  notifySidePanel({ type: 'agentBridgeStatus', state, detail });
+}
+
+function publishAgentBridgeEvent(message: Record<string, unknown>): void {
+  if (message.type === 'pong') return;
+  const event = { seq: ++agentBridgeEventSeq, message };
+  agentBridgeEvents.push(event);
+  if (agentBridgeEvents.length > AGENT_BRIDGE_EVENT_LIMIT) agentBridgeEvents.shift();
+  if (message.type === 'reply' || (message.type === 'reply_stream' && message.done === true)) {
+    completeSidebarTask(message.reply_ctx ?? message.msg_id ?? message.task_id);
+  }
+  persistSidebarRuntimeState();
+  notifySidePanel({ type: 'agentBridgeEvent', event });
+}
+
+function completeSidebarTask(replyTaskId?: unknown, replyBindingEpoch?: number): boolean {
+  if (sidebarTarget.status !== 'busy') return false;
+  const expectedEpoch = replyBindingEpoch ?? sidebarTarget.taskBindingEpoch;
+  if (expectedEpoch !== sidebarTarget.bindingEpoch) return false;
+  const normalizedTaskId = replyTaskId == null ? '' : String(replyTaskId);
+  if (sidebarTarget.taskId && normalizedTaskId !== sidebarTarget.taskId) return false;
+  setSidebarTarget({
+    ...sidebarTarget,
+    status: 'bound',
+    taskId: null,
+    taskBindingEpoch: null,
+  });
+  return true;
+}
+
+function agentBridgeSnapshot(afterSeq = 0) {
+  return {
+    ok: true,
+    state: agentBridgeState,
+    detail: agentBridgeDetail,
+    registered: agentBridgeRegistered,
+    lastSeq: agentBridgeEventSeq,
+    events: agentBridgeEvents.filter((event) => event.seq > afterSeq),
+    target: sidebarTarget,
+  };
+}
+
+function stopAgentBridgeKeepalive(): void {
+  if (agentBridgeKeepaliveTimer) clearInterval(agentBridgeKeepaliveTimer);
+  agentBridgeKeepaliveTimer = null;
+}
+
+function startAgentBridgeKeepalive(socket: WebSocket): void {
+  stopAgentBridgeKeepalive();
+  agentBridgeKeepaliveTimer = setInterval(() => {
+    if (socket !== agentBridgeWs || socket.readyState !== WebSocket.OPEN) {
+      stopAgentBridgeKeepalive();
+      return;
+    }
+    safeSend(socket, { type: 'ping', ts: Date.now() });
+  }, AGENT_BRIDGE_KEEPALIVE_MS);
+}
+
+function clearAgentBridgeReconnect(): void {
+  if (agentBridgeReconnectTimer) clearTimeout(agentBridgeReconnectTimer);
+  agentBridgeReconnectTimer = null;
+}
+
+function disconnectAgentBridge(): void {
+  agentBridgeGeneration++;
+  clearAgentBridgeReconnect();
+  stopAgentBridgeKeepalive();
+  agentBridgeRegistered = false;
+  const oldSocket = agentBridgeWs;
+  agentBridgeWs = null;
+  if (oldSocket) {
+    try { oldSocket.close(); } catch { /* ignore */ }
+  }
+}
+
+function scheduleAgentBridgeReconnect(): void {
+  if (agentBridgeReconnectTimer) return;
+  const delay = Math.min(30_000, 1000 * 2 ** Math.min(agentBridgeReconnectAttempts, 5));
+  agentBridgeReconnectAttempts++;
+  agentBridgeReconnectTimer = setTimeout(() => {
+    agentBridgeReconnectTimer = null;
+    void reconnectAgentBridgeFromStorage();
+  }, delay + Math.floor(Math.random() * 500));
+}
+
+function connectAgentBridge(config: ExtensionRuntimeConfig, force = false): void {
+  const base = config.bridgeUrl.trim();
+  const signature = JSON.stringify([
+    base,
+    config.bridgeToken,
+    config.bridgeProject.trim(),
+    config.deviceId.trim(),
+  ]);
+  const active = agentBridgeWs?.readyState === WebSocket.OPEN
+    || agentBridgeWs?.readyState === WebSocket.CONNECTING;
+  if (!force && signature === agentBridgeConfigSignature && active) return;
+
+  disconnectAgentBridge();
+  agentBridgeConfigSignature = signature;
+  if (!base) {
+    setAgentBridgeState('disconnected', '未配置 Bridge URL');
+    return;
+  }
+
+  setAgentBridgeState('connecting');
+  const generation = agentBridgeGeneration;
+  let socket: WebSocket;
+  try {
+    socket = new WebSocket(bridgeWsUrl(base, config.bridgeToken));
+  } catch (err) {
+    setAgentBridgeState('error', err instanceof Error ? err.message : String(err));
+    scheduleAgentBridgeReconnect();
+    return;
+  }
+  agentBridgeWs = socket;
+
+  socket.onopen = () => {
+    if (generation !== agentBridgeGeneration || socket !== agentBridgeWs) return;
+    const registration: Record<string, unknown> = {
+      type: 'register',
+      platform: AGENT_BRIDGE_PLATFORM,
+      capabilities: ['text', 'preview', 'typing'],
+      metadata: {
+        version: chrome.runtime.getManifest().version,
+        protocol_version: 1,
+        description: 'OpenCLI browser side panel',
+        device_id: config.deviceId || undefined,
+      },
+    };
+    if (config.bridgeProject.trim()) registration.project = config.bridgeProject.trim();
+    safeSend(socket, registration);
+    startAgentBridgeKeepalive(socket);
+  };
+
+  socket.onmessage = (event) => {
+    if (generation !== agentBridgeGeneration || socket !== agentBridgeWs) return;
+    let message: Record<string, unknown>;
+    try {
+      message = JSON.parse(String(event.data)) as Record<string, unknown>;
+    } catch {
+      message = { type: 'raw', content: String(event.data).slice(0, 200) };
+    }
+    if (message.type === 'register_ack') {
+      agentBridgeRegistered = message.ok === true;
+      if (agentBridgeRegistered) {
+        agentBridgeReconnectAttempts = 0;
+        clearAgentBridgeReconnect();
+        setAgentBridgeState('connected');
+      } else {
+        setAgentBridgeState('error', String(message.error || 'register rejected'));
+      }
+    }
+    publishAgentBridgeEvent(message);
+  };
+
+  socket.onclose = (event) => {
+    if (generation !== agentBridgeGeneration || socket !== agentBridgeWs) return;
+    stopAgentBridgeKeepalive();
+    agentBridgeWs = null;
+    agentBridgeRegistered = false;
+    const detail = event.reason ? `${event.code}: ${event.reason}` : `code ${event.code || 1006}`;
+    setAgentBridgeState('disconnected', detail);
+    scheduleAgentBridgeReconnect();
+  };
+
+  socket.onerror = () => {
+    if (generation !== agentBridgeGeneration || socket !== agentBridgeWs) return;
+    setAgentBridgeState('error', 'WebSocket error，正在重连');
+    try { socket.close(); } catch { /* ignore */ }
+  };
+}
+
+async function reconnectAgentBridgeFromStorage(force = false): Promise<void> {
+  const config = await loadRuntimeConfig();
+  connectAgentBridge(config, force);
+}
+
+function sendAgentBridgePayload(payload: unknown, displayText?: unknown): { ok: boolean; error?: string } {
+  if (!agentBridgeWs || agentBridgeWs.readyState !== WebSocket.OPEN || !agentBridgeRegistered) {
+    return { ok: false, error: 'Agent Bridge 未连接或尚未完成注册' };
+  }
+  if (!safeSend(agentBridgeWs, payload)) return { ok: false, error: 'Agent Bridge 发送失败' };
+  const body = payload as Record<string, unknown>;
+  if (body.type === 'message') {
+    const content = String(body.content ?? '');
+    if (content === '/stop') {
+      if (sidebarTarget.status === 'busy') {
+        setSidebarTarget({ ...sidebarTarget, status: 'bound', taskId: null, taskBindingEpoch: null });
+      }
+    } else {
+      if (sidebarTarget.status === 'bound') {
+        setSidebarTarget({
+          ...sidebarTarget,
+          status: 'busy',
+          taskId: String(body.msg_id ?? '') || null,
+          taskBindingEpoch: sidebarTarget.bindingEpoch,
+        });
+      }
+      publishAgentBridgeEvent({ type: 'user_message', content: String(displayText ?? content) });
+    }
+  }
+  return { ok: true };
 }
 
 // ─── Browser target leases ───────────────────────────────────────────
@@ -1196,6 +1605,12 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
       scheduleIdleAlarm(leaseKey, IDLE_TIMEOUT_NONE);
     }
   }
+  if (sidebarTarget.windowId === windowId) {
+    setSidebarTarget({
+      ...sidebarTarget, status: 'broken', taskId: null, taskBindingEpoch: null,
+      errorCode: 'bound_tab_gone', error: '绑定标签所在窗口已关闭，请重新绑定。',
+    });
+  }
   await persistRuntimeState();
 });
 
@@ -1213,7 +1628,34 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
       console.log(`[opencli] Session ${session.session} detached from tab ${tabId} (tab closed)`);
     }
   }
+  if (sidebarTarget.tabId === tabId) {
+    setSidebarTarget({
+      ...sidebarTarget, status: 'broken', taskId: null, taskBindingEpoch: null,
+      errorCode: 'bound_tab_gone', error: '绑定标签已关闭，请重新绑定。',
+    });
+  }
   await persistRuntimeState();
+});
+
+chrome.tabs.onUpdated.addListener((tabId, _changeInfo, tab) => {
+  if (sidebarTarget.tabId !== tabId) return;
+  if (!isDebuggableUrl(tab.url)) {
+    setSidebarTarget({
+      ...sidebarTarget, status: 'broken', taskId: null, taskBindingEpoch: null,
+      title: tab.title ?? sidebarTarget.title, url: tab.url ?? sidebarTarget.url,
+      errorCode: 'bound_tab_not_debuggable', error: '绑定标签已进入不可调试页面，请重新绑定。',
+    });
+    return;
+  }
+  setSidebarTarget({
+    ...sidebarTarget,
+    status: sidebarTarget.status === 'busy' ? 'busy' : 'bound',
+    windowId: tab.windowId,
+    title: tab.title ?? sidebarTarget.title,
+    url: tab.url ?? sidebarTarget.url,
+    errorCode: undefined,
+    error: undefined,
+  });
 });
 
 // ─── Lifecycle events ────────────────────────────────────────────────
@@ -1249,6 +1691,7 @@ function initialize(): void {
   workerReady = (async () => {
     await getCurrentContextId();
     await reconcileTargetLeaseRegistry();
+    await recoverSidebarRuntimeState();
   })().catch((err) => {
     // Never leave workerReady rejected/pending: a wedged gate would freeze
     // every gated handler for the life of the worker.
@@ -1256,7 +1699,10 @@ function initialize(): void {
   }).finally(() => {
     workerRecovered = true;
   });
-  void workerReady.then(() => connect());
+  void workerReady.then(() => {
+    void connect();
+    void reconnectAgentBridgeFromStorage();
+  });
   // Open side panel when clicking the action icon (MV3).
   try {
     void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
@@ -1283,7 +1729,14 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   // Idle-lease alarms and keepalive can both fire in a freshly woken worker;
   // gate on recovery so releaseLease never persists an empty snapshot.
   await workerReady;
-  if (alarm.name === 'keepalive') void connect();
+  if (alarm.name === 'keepalive') {
+    void connect();
+    if (agentBridgeWs?.readyState === WebSocket.OPEN) {
+      safeSend(agentBridgeWs, { type: 'ping', ts: Date.now() });
+    } else {
+      void reconnectAgentBridgeFromStorage();
+    }
+  }
   const leaseKey = leaseKeyFromAlarmName(alarm.name);
   if (!leaseKey) return;
   if ((activeCommandCounts.get(leaseKey) ?? 0) > 0) {
@@ -1337,6 +1790,40 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
 
+  if (msg?.type === 'connectAgentBridge') {
+    void (async () => {
+      const config = await loadRuntimeConfig();
+      connectAgentBridge(config, msg.force === true);
+      sendResponse(agentBridgeSnapshot(Number(msg.afterSeq) || 0));
+    })();
+    return true;
+  }
+
+  if (msg?.type === 'getAgentBridgeState') {
+    sendResponse(agentBridgeSnapshot(Number(msg.afterSeq) || 0));
+    return true;
+  }
+
+  if (msg?.type === 'getSidebarState') {
+    sendResponse({ ok: true, target: sidebarTarget });
+    return true;
+  }
+
+  if (msg?.type === 'bindSidebarTarget') {
+    void bindSidebarTarget(msg.tabId, msg.windowId).then(sendResponse);
+    return true;
+  }
+
+  if (msg?.type === 'unbindSidebarTarget') {
+    void unbindSidebarTarget().then(sendResponse);
+    return true;
+  }
+
+  if (msg?.type === 'sendAgentBridgePayload') {
+    sendResponse(sendAgentBridgePayload(msg.payload, msg.displayText));
+    return true;
+  }
+
   if (msg?.type === 'saveRuntimeConfig') {
     void (async () => {
       const config = await saveRuntimeConfig(msg.patch ?? {});
@@ -1352,6 +1839,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         ws = null;
       }
       void connect();
+      connectAgentBridge(config, true);
       sendResponse({ ok: true, config });
     })();
     return true;
@@ -1420,6 +1908,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
     ws = null;
   }
   void connect();
+  void reconnectAgentBridgeFromStorage();
 });
 
 /**
@@ -1452,6 +1941,37 @@ async function handleCommand(cmd: Command): Promise<Result> {
   const session = getSessionName(cmd.session);
   const surface = getCommandSurface(cmd);
   const leaseKey = getLeaseKey(session, surface);
+  if (cmd.targetPolicy === 'bound-only') {
+    if (surface === 'adapter') {
+      return {
+        id: cmd.id, ok: false, errorCode: 'adapter_requires_owned_tab',
+        error: 'This adapter requires an owned browser tab and is unavailable in sidebar current-tab mode.',
+        errorHint: 'Run it from the normal CLI workflow, or use browser sidebar commands supported on the bound page.',
+      };
+    }
+    if (session !== 'sidebar') {
+      return {
+        id: cmd.id, ok: false, errorCode: 'sidebar_session_required',
+        error: 'Sidebar current-tab mode requires browser session "sidebar".',
+      };
+    }
+    const target = automationSessions.get(leaseKey);
+    if (!target || target.owned || target.kind !== 'bound' || target.preferredTabId === null) {
+      return {
+        id: cmd.id, ok: false, errorCode: 'bound_target_required',
+        error: 'Sidebar current-tab mode has no valid bound target.',
+        errorHint: 'Open the side panel on an http(s) page and bind that tab before retrying.',
+      };
+    }
+    const mutatesTabLifecycle = cmd.action === 'tabs' && cmd.op !== 'list';
+    if (mutatesTabLifecycle || cmd.action === 'close-window' || cmd.action === 'bind') {
+      console.warn(`[opencli] Rejected sidebar tab/window mutation: action=${cmd.action} op=${cmd.op ?? ''}`);
+      return {
+        id: cmd.id, ok: false, errorCode: 'bound_tab_mutation_blocked',
+        error: 'Sidebar current-tab mode does not allow tab or window lifecycle operations.',
+      };
+    }
+  }
   if (cmd.windowMode === 'foreground' || cmd.windowMode === 'background') {
     setSessionOverride(leaseKey, { windowMode: cmd.windowMode });
   }
@@ -2438,6 +2958,12 @@ async function handleBind(cmd: Command, leaseKey: string): Promise<Result> {
 }
 
 export const __test__ = {
+  bindSidebarTarget,
+  unbindSidebarTarget,
+  completeSidebarTask,
+  agentBridgeSnapshot,
+  getSidebarTarget: () => ({ ...sidebarTarget }),
+  setSidebarTargetForTest: (target: SidebarTarget) => { sidebarTarget = { ...target }; },
   handleExec,
   handleNavigate,
   isTargetUrl,

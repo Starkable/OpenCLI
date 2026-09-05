@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/opencli.iml" filepath="$PROJECT_DIR$/.idea/opencli.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/OpenCLI-self.iml" filepath="$PROJECT_DIR$/.idea/OpenCLI-self.iml" />
     </modules>
   </component>
 </project>

@@ -220,11 +220,15 @@ function createChromeMock() {
         }),
       },
       session: {
-        get: vi.fn(async (key: string) => ({ [key]: sessionStorageState[key] })),
+        get: vi.fn(async (key: string | string[]) => {
+          const keys = Array.isArray(key) ? key : [key];
+          return Object.fromEntries(keys.map((entry) => [entry, sessionStorageState[entry]]));
+        }),
         set: vi.fn(async (items: Record<string, unknown>) => {
           Object.assign(sessionStorageState, items);
         }),
       },
+      onChanged: { addListener: vi.fn() } as Listener<(changes: unknown, area: string) => void>,
     },
     runtime: {
       onInstalled: { addListener: vi.fn() } as Listener<() => void>,
@@ -2015,6 +2019,205 @@ describe('background tab isolation', () => {
     }));
     expect(chrome.tabs.update).toHaveBeenCalledWith(2, expect.objectContaining({ url: 'https://other.example' }));
     expect(chrome.tabs.create).not.toHaveBeenCalled();
+  });
+
+  it('keeps sidebar commands pinned to the explicitly bound tab after focus changes', async () => {
+    const { chrome, tabs } = createChromeMock();
+    vi.stubGlobal('chrome', chrome);
+
+    const mod = await import('./background');
+    const bound = await mod.__test__.bindSidebarTarget(2, 2);
+    tabs[0].active = true;
+    tabs[1].active = false;
+
+    const result = await mod.__test__.handleCommand({
+      id: 'sidebar-pinned-list',
+      action: 'tabs',
+      op: 'list',
+      session: 'sidebar',
+      surface: 'browser',
+      targetPolicy: 'bound-only',
+    });
+
+    expect(bound).toEqual(expect.objectContaining({ ok: true }));
+    expect(result).toEqual(expect.objectContaining({
+      ok: true,
+      data: [expect.objectContaining({ page: 'target-2', url: 'https://user.example' })],
+    }));
+    expect(mod.__test__.getSession(browserKey('sidebar'))).toEqual(expect.objectContaining({
+      preferredTabId: 2,
+      owned: false,
+    }));
+    expect(chrome.tabs.create).not.toHaveBeenCalled();
+    expect(chrome.windows.create).not.toHaveBeenCalled();
+  });
+
+  it('fails sidebar bound-only commands when no target is bound', async () => {
+    const { chrome } = createChromeMock();
+    vi.stubGlobal('chrome', chrome);
+
+    const mod = await import('./background');
+    const result = await mod.__test__.handleCommand({
+      id: 'sidebar-unbound',
+      action: 'exec',
+      code: 'document.title',
+      session: 'sidebar',
+      surface: 'browser',
+      targetPolicy: 'bound-only',
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: false,
+      errorCode: 'bound_target_required',
+    }));
+    expect(chrome.tabs.create).not.toHaveBeenCalled();
+    expect(chrome.windows.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects owned-tab adapter commands under the sidebar target policy', async () => {
+    const { chrome } = createChromeMock();
+    vi.stubGlobal('chrome', chrome);
+
+    const mod = await import('./background');
+    await mod.__test__.bindSidebarTarget(2, 2);
+    const result = await mod.__test__.handleCommand({
+      id: 'sidebar-adapter',
+      action: 'exec',
+      code: 'document.title',
+      session: 'sidebar',
+      surface: 'adapter',
+      targetPolicy: 'bound-only',
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: false,
+      errorCode: 'adapter_requires_owned_tab',
+    }));
+    expect(chrome.tabs.create).not.toHaveBeenCalled();
+    expect(chrome.windows.create).not.toHaveBeenCalled();
+  });
+
+  it('blocks rebinding while a sidebar task is busy', async () => {
+    const { chrome } = createChromeMock();
+    vi.stubGlobal('chrome', chrome);
+
+    const mod = await import('./background');
+    await mod.__test__.bindSidebarTarget(2, 2);
+    mod.__test__.setSidebarTargetForTest({
+      ...mod.__test__.getSidebarTarget(),
+      status: 'busy',
+      taskId: 'task-1',
+    });
+
+    const result = await mod.__test__.bindSidebarTarget(1, 1);
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: false,
+      errorCode: 'sidebar_target_busy',
+    }));
+    expect(mod.__test__.getSidebarTarget()).toEqual(expect.objectContaining({ tabId: 2 }));
+  });
+
+  it('binds the explicit tab id even when browser focus changes during the request', async () => {
+    const { chrome, tabs } = createChromeMock();
+    vi.stubGlobal('chrome', chrome);
+
+    const mod = await import('./background');
+    const binding = mod.__test__.bindSidebarTarget(2, 2);
+    tabs[0].active = true;
+    tabs[1].active = false;
+    const result = await binding;
+
+    expect(result).toEqual(expect.objectContaining({ ok: true }));
+    expect(mod.__test__.getSidebarTarget()).toEqual(expect.objectContaining({
+      status: 'bound',
+      tabId: 2,
+      windowId: 2,
+    }));
+    expect(chrome.tabs.create).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { tabId: 999, windowId: 2, errorCode: 'bound_tab_not_found' },
+    { tabId: 2, windowId: 1, errorCode: 'bound_tab_window_mismatch' },
+    { tabId: 3, windowId: 1, errorCode: 'bound_tab_not_debuggable' },
+  ])('fails closed for an invalid explicit sidebar target: $errorCode', async ({ tabId, windowId, errorCode }) => {
+    const { chrome } = createChromeMock();
+    vi.stubGlobal('chrome', chrome);
+
+    const mod = await import('./background');
+    const result = await mod.__test__.bindSidebarTarget(tabId, windowId);
+
+    expect(result).toEqual(expect.objectContaining({ ok: false, errorCode }));
+    expect(chrome.tabs.create).not.toHaveBeenCalled();
+    expect(chrome.windows.create).not.toHaveBeenCalled();
+  });
+
+  it('ignores a late completion from an older binding epoch', async () => {
+    const { chrome } = createChromeMock();
+    vi.stubGlobal('chrome', chrome);
+
+    const mod = await import('./background');
+    await mod.__test__.bindSidebarTarget(2, 2);
+    const oldEpoch = mod.__test__.getSidebarTarget().bindingEpoch;
+    await mod.__test__.bindSidebarTarget(1, 1);
+    const current = mod.__test__.getSidebarTarget();
+    mod.__test__.setSidebarTargetForTest({
+      ...current,
+      status: 'busy',
+      taskId: 'new-task',
+      taskBindingEpoch: current.bindingEpoch,
+    });
+
+    const completed = mod.__test__.completeSidebarTask('old-task', oldEpoch);
+
+    expect(completed).toBe(false);
+    expect(mod.__test__.getSidebarTarget()).toEqual(expect.objectContaining({
+      status: 'busy',
+      tabId: 1,
+      taskId: 'new-task',
+    }));
+  });
+
+  it('restores the sticky target, busy task, and recent timeline after worker restart', async () => {
+    const { chrome } = createChromeMock();
+    await chrome.storage.session.set({
+      opencli_sidebar_runtime_v1: {
+        target: {
+          status: 'busy',
+          tabId: 2,
+          windowId: 2,
+          title: 'stored title',
+          url: 'https://user.example',
+          bindingEpoch: 7,
+          taskId: 'stored-task',
+          taskBindingEpoch: 7,
+        },
+        eventSeq: 4,
+        events: [{ seq: 4, message: { type: 'user_message', content: 'stored prompt' } }],
+      },
+    });
+    vi.stubGlobal('chrome', chrome);
+
+    const mod = await import('./background');
+    await vi.waitFor(() => {
+      expect(mod.__test__.getSidebarTarget()).toEqual(expect.objectContaining({
+        status: 'busy',
+        tabId: 2,
+        bindingEpoch: 7,
+        taskId: 'stored-task',
+      }));
+    });
+
+    expect(mod.__test__.agentBridgeSnapshot(0)).toEqual(expect.objectContaining({
+      lastSeq: 4,
+      events: [expect.objectContaining({
+        seq: 4,
+        message: expect.objectContaining({ content: 'stored prompt' }),
+      })],
+    }));
+    expect(chrome.tabs.create).not.toHaveBeenCalled();
+    expect(chrome.windows.create).not.toHaveBeenCalled();
   });
 
   const REGISTRY_KEY = 'opencli_target_lease_registry_v2';
