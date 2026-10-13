@@ -83,7 +83,9 @@ type = "claudecode"   # or "cursor"; Pi Agent later via adapter
 # mode = "yolo"
 ```
 
-侧边栏作为 Bridge 外部 adapter：`platform=opencli-sidebar`，capabilities 含 `text` / `preview` / `typing`。
+侧边栏作为 Bridge 外部 adapter：`platform` **等于侧栏填写的 cc-connect Project 名称**（空则回退 `opencli-sidebar`），capabilities 含 `text` / `preview` / `typing`。  
+多人并行时每人必须使用不同 Project（从而占用不同 Bridge adapter 槽位；同名 platform 会被 cc-connect 后连顶替）。  
+`session_key` 形如 `{Project名}:{deviceId}:{deviceId}`。
 
 预留 Pi Agent：将 `projects.agent.type` 换成 Pi 对应 adapter（实现不在本变更范围）。
 
@@ -96,7 +98,7 @@ type = "claudecode"   # or "cursor"; Pi Agent later via adapter
    - Remote Token：与 `OPENCLI_REMOTE_TOKEN` 相同
    - Bridge WS URL：`ws://<server>:9810/bridge/ws`
    - Bridge Token：与 cc-connect `[bridge].token` 相同
-   - **cc-connect Project 名称**：与专用 `[[projects]].name` 一致（多项目必填，如 `opencli-sidebar`）
+   - **cc-connect Project 名称**：与专用 `[[projects]].name` 一致（多项目/多人必填且须唯一，如 `opencli-sidebar-alice`；该名称同时作为 Bridge `platform`）
 3. 保存并重连；确认「浏览器接线」「Agent Bridge」均为已连接。
 4. 在希望操作的普通 `http(s)` 页面点击“绑定当前标签”（首次发送也会自动绑定一次）。
 5. 绑定后可自由切换到其他标签；后续消息继续操作原标签，直到手动重新绑定、解除绑定，或原标签被关闭/变为不可调试页面。

@@ -110,6 +110,16 @@
     .cfg label { font-size: 11px; color: var(--muted); }
     .cfg input, .cfg select { width: 100%; }
     .err { color: var(--bad); font-size: 12px; }
+    .target-card {
+      padding: 10px 14px;
+      background: var(--card);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .target-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .target-url { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   </style>
 </head>
 <body>
@@ -125,6 +135,19 @@
       <span class="pill" id="bridgeLabel">Agent Bridge：未连接</span>
     </div>
   </header>
+
+  <section class="target-card">
+    <div class="row">
+      <span class="dot bad" id="targetDot"></span>
+      <span class="pill" id="targetStatus">操作目标：未绑定</span>
+    </div>
+    <div class="target-title" id="targetTitle">请在需要操作的页面绑定当前标签</div>
+    <div class="target-url" id="targetUrl"></div>
+    <div class="row">
+      <button type="button" class="secondary" id="btnBind">绑定当前标签</button>
+      <button type="button" class="secondary" id="btnUnbind">解除绑定</button>
+    </div>
+  </section>
 
   <section class="cfg" id="cfgPanel">
     <label>模式
@@ -151,10 +174,10 @@
     <label>Bridge Token
       <input id="bridgeToken" type="password" autocomplete="off" />
     </label>
-    <label class="row">
-      <input type="checkbox" id="preferBindActiveTab" checked />
-      发任务前绑定当前前台 tab（session=sidebar）
+    <label>cc-connect Project 名称（多项目必填，如 opencli-sidebar）
+      <input id="bridgeProject" placeholder="opencli-sidebar" autocomplete="off" />
     </label>
+    <input type="checkbox" id="preferBindActiveTab" checked hidden />
     <div class="row">
       <button type="button" id="btnSaveCfg">保存并重连</button>
       <button type="button" class="secondary" id="btnReconnect">仅重连接线</button>
@@ -171,7 +194,6 @@
     <div class="row">
       <button type="button" id="btnSend">发送</button>
       <button type="button" class="secondary" id="btnStop">停止</button>
-      <button type="button" class="secondary" id="btnBind">绑定当前 Tab</button>
     </div>
     <div class="err" id="sendError"></div>
   </div>

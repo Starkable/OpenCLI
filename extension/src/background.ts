@@ -10,6 +10,7 @@ declare const __OPENCLI_COMPAT_RANGE__: string;
 import type { Command, Result } from './protocol';
 import {
   loadRuntimeConfig,
+  resolveBridgePlatform,
   resolveDaemonEndpoints,
   saveRuntimeConfig,
   type ExtensionRuntimeConfig,
@@ -310,7 +311,6 @@ function scheduleReconnect(): void {
 // the service worker so tasks survive tab changes, and buffer replies for the
 // next side-panel instance to replay.
 
-const AGENT_BRIDGE_PLATFORM = 'opencli-sidebar';
 const AGENT_BRIDGE_EVENT_LIMIT = 200;
 const AGENT_BRIDGE_KEEPALIVE_MS = 20_000;
 type AgentBridgeState = 'connected' | 'connecting' | 'disconnected' | 'error';
@@ -623,9 +623,13 @@ function connectAgentBridge(config: ExtensionRuntimeConfig, force = false): void
 
   socket.onopen = () => {
     if (generation !== agentBridgeGeneration || socket !== agentBridgeWs) return;
+    // platform must equal project name so each user occupies a unique Bridge adapter slot
+    // (cc-connect replaces same-platform connections). Empty project → opencli-sidebar.
+    const platform = resolveBridgePlatform(config);
+    const project = config.bridgeProject.trim();
     const registration: Record<string, unknown> = {
       type: 'register',
-      platform: AGENT_BRIDGE_PLATFORM,
+      platform,
       capabilities: ['text', 'preview', 'typing'],
       metadata: {
         version: chrome.runtime.getManifest().version,
@@ -634,7 +638,7 @@ function connectAgentBridge(config: ExtensionRuntimeConfig, force = false): void
         device_id: config.deviceId || undefined,
       },
     };
-    if (config.bridgeProject.trim()) registration.project = config.bridgeProject.trim();
+    if (project) registration.project = project;
     safeSend(socket, registration);
     startAgentBridgeKeepalive(socket);
   };

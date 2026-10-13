@@ -9,9 +9,11 @@
 ```text
 扩展 A (deviceId=a) ──deviceToken──┐
 扩展 B (deviceId=b) ──deviceToken──┼──► daemon :19825 ──按 --profile 路由──► 对应扩展
-侧边栏 A session=opencli-sidebar:a:a ──► Bridge ──► Agent(OPENCLI_PROFILE=a) ──► opencli
-侧边栏 B session=opencli-sidebar:b:b ──► Bridge ──► Agent(OPENCLI_PROFILE=b) ──► opencli
+侧边栏 A project=opencli-sidebar-a  session=opencli-sidebar-a:a:a ──► Bridge ──► Agent(OPENCLI_PROFILE=a)
+侧边栏 B project=opencli-sidebar-b  session=opencli-sidebar-b:b:b ──► Bridge ──► Agent(OPENCLI_PROFILE=b)
 ```
+
+> Bridge `platform` = 侧栏「cc-connect Project 名称」。多人必须一人一 Project，否则同名 platform 会互踢。
 
 | 模式 | 启用条件 | 多连接 | 命令路由 |
 |------|----------|--------|----------|
@@ -52,7 +54,10 @@ opencli daemon start
 1. 模式选 `remote`，填写 Daemon Base URL。
 2. 填写 **Device Id** + **Device Token**（推荐）。
 3. Bridge URL / Token 照常。
-4. 保存后：`hello.contextId` = `deviceId`；`session_key` = `opencli-sidebar:{deviceId}:{deviceId}`。
+4. 填写 **cc-connect Project 名称**（与该设备专用 `[[projects]].name` 一致，须唯一）。
+5. 保存后：`hello.contextId` = `deviceId`；`register.platform` = Project 名；`session_key` = `{Project名}:{deviceId}:{deviceId}`（Project 为空时前缀回退 `opencli-sidebar`）。
+
+> **BREAKING（会话键）**：升级后若 Project 不再是默认名，旧的 `opencli-sidebar:{deviceId}:{deviceId}` 会话不会自动续接，侧栏会以新 `session_key` 开新会话。
 
 未配置 device 凭证且未配置共享 Remote Token 时，侧边栏**不会**宣称浏览器通道就绪。
 

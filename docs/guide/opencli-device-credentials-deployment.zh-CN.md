@@ -454,7 +454,7 @@ opencli-sidebar-sxh
 
 - `Device ID` 必须与 daemon 签发的 ID、Agent 的 `OPENCLI_PROFILE` 完全一致。
 - `Device Token` 必须与该 Device ID 配套。
-- `cc-connect Project` 必须与 `[[projects]].name` 完全一致。
+- `cc-connect Project` 必须与 `[[projects]].name` 完全一致；该名称同时作为 Bridge `platform`（多人勿共用同一 Project）。
 - 使用设备凭证后将 `Remote Token` 留空。
 - Daemon 使用 HTTP URL；Bridge 使用 WebSocket URL。
 
@@ -465,11 +465,15 @@ opencli-sidebar-sxh
 Agent Bridge：已连接
 ```
 
-设备模式下 Side Panel 的会话键形如：
+设备模式下 Side Panel 的会话键形如 `{Project名}:{deviceId}:{deviceId}`。  
+若 Project 填 `opencli-sidebar-sxh`、Device ID 为 `sxh-browser`：
 
 ```text
-opencli-sidebar:sxh-browser:sxh-browser
+platform    = opencli-sidebar-sxh
+session_key = opencli-sidebar-sxh:sxh-browser:sxh-browser
 ```
+
+> **BREAKING（会话键）**：相对旧版固定前缀 `opencli-sidebar:`，升级后旧 Bridge 会话历史不自动续接。
 
 ## 10. 绑定标签与粘性操作
 

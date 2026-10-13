@@ -1,9 +1,12 @@
 /**
  * OpenCLI Side Panel — Chat UI + config for remote daemon / cc-connect Bridge.
  * Bridge protocol: https://github.com/chenhg5/cc-connect/blob/main/docs/bridge-protocol.md
+ *
+ * Bridge platform / session_key prefix MUST mirror extension/src/config.ts
+ * resolveBridgePlatform + buildBridgeSessionKey (sidepanel is not Vite-bundled).
  */
 
-const PLATFORM = 'opencli-sidebar';
+const DEFAULT_BRIDGE_PLATFORM = 'opencli-sidebar';
 const logEl = document.getElementById('log');
 const sendError = document.getElementById('sendError');
 const cfgError = document.getElementById('cfgError');
@@ -25,7 +28,7 @@ let sidebarTarget = { status: 'unbound', tabId: null, windowId: null, bindingEpo
 /** @type {string} */
 let sessionUserId = 'local';
 /** @type {string} */
-let sessionKey = `${PLATFORM}:local:local`;
+let sessionKey = `${DEFAULT_BRIDGE_PLATFORM}:local:local`;
 let msgSeq = 0;
 let streamBuffer = '';
 
@@ -41,11 +44,21 @@ function sanitizeSessionSegment(value) {
   return raw.replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 64) || 'local';
 }
 
-/** Align Bridge session_key with deviceId (one device per user). */
+/** Same rule as resolveBridgePlatform in extension/src/config.ts */
+function resolveBridgePlatform(config) {
+  const project = String(config?.bridgeProject || '').trim();
+  return project || DEFAULT_BRIDGE_PLATFORM;
+}
+
+/**
+ * Align Bridge session_key with Project (platform) + deviceId.
+ * Format: {bridgeProject|opencli-sidebar}:{deviceId}:{deviceId}
+ */
 function applySessionIdentity(config) {
+  const platform = resolveBridgePlatform(config);
   const deviceId = sanitizeSessionSegment(config?.deviceId);
   sessionUserId = deviceId;
-  sessionKey = `${PLATFORM}:${deviceId}:${deviceId}`;
+  sessionKey = `${platform}:${deviceId}:${deviceId}`;
 }
 
 function setDaemonStatus(connected, reconnecting, mode, opts = {}) {
@@ -200,8 +213,9 @@ function handleBridgeMessage(msg) {
         bridgeRegistered = true;
         setBridgeStatus('connected');
         const proj = (document.getElementById('bridgeProject')?.value || '').trim();
+        const platform = resolveBridgePlatform({ bridgeProject: proj });
         appendLog(
-          `已注册到 cc-connect Bridge（session=${sessionKey}${proj ? `, project=${proj}` : ''}）`,
+          `已注册到 cc-connect Bridge（platform=${platform}, session=${sessionKey}${proj ? `, project=${proj}` : ''}）`,
         );
       } else {
         bridgeRegistered = false;
@@ -408,7 +422,10 @@ document.getElementById('btnSaveCfg').addEventListener('click', async () => {
       return;
     }
     applySessionIdentity(res.config);
-    appendLog(`配置已保存；session_key=${sessionKey}；正在重连接线 / Bridge`);
+    const platform = resolveBridgePlatform(res.config);
+    appendLog(
+      `配置已保存；platform=${platform}；session_key=${sessionKey}；正在重连接线 / Bridge`,
+    );
     await refreshDaemonStatus();
     await connectBridge(res.config);
   } catch (err) {

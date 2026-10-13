@@ -41,7 +41,40 @@ export const DEFAULT_RUNTIME_CONFIG: ExtensionRuntimeConfig = {
   preferBindActiveTab: true,
 };
 
+/** Fallback Bridge platform when bridgeProject is empty (single-user / legacy). */
+export const DEFAULT_BRIDGE_PLATFORM = 'opencli-sidebar';
+
 export const STORAGE_KEY = 'opencliRuntimeConfig';
+
+/**
+ * Resolve cc-connect Bridge adapter platform from configured project name.
+ * Must stay aligned with sidepanel session_key prefix (one project → one adapter slot).
+ */
+export function resolveBridgePlatform(
+  config: Pick<ExtensionRuntimeConfig, 'bridgeProject'>,
+): string {
+  const project = config.bridgeProject?.trim() ?? '';
+  return project || DEFAULT_BRIDGE_PLATFORM;
+}
+
+/** Sanitize deviceId (or other) for Bridge session_key segments. */
+export function sanitizeBridgeSessionSegment(value: string | undefined | null): string {
+  const raw = String(value || '').trim();
+  if (!raw) return 'local';
+  return raw.replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 64) || 'local';
+}
+
+/**
+ * Build Bridge session_key: `{platform}:{deviceId}:{deviceId}`.
+ * platform comes from bridgeProject (see resolveBridgePlatform).
+ */
+export function buildBridgeSessionKey(
+  config: Pick<ExtensionRuntimeConfig, 'bridgeProject' | 'deviceId'>,
+): string {
+  const platform = resolveBridgePlatform(config);
+  const deviceId = sanitizeBridgeSessionSegment(config.deviceId);
+  return `${platform}:${deviceId}:${deviceId}`;
+}
 
 export async function loadRuntimeConfig(): Promise<ExtensionRuntimeConfig> {
   const result = await chrome.storage.local.get(STORAGE_KEY);

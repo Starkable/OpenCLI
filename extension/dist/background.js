@@ -9,7 +9,12 @@ const DEFAULT_RUNTIME_CONFIG = {
   bridgeProject: "",
   preferBindActiveTab: true
 };
+const DEFAULT_BRIDGE_PLATFORM = "opencli-sidebar";
 const STORAGE_KEY = "opencliRuntimeConfig";
+function resolveBridgePlatform(config) {
+  const project = config.bridgeProject?.trim() ?? "";
+  return project || DEFAULT_BRIDGE_PLATFORM;
+}
 async function loadRuntimeConfig() {
   const result = await chrome.storage.local.get(STORAGE_KEY);
   const raw = result[STORAGE_KEY];
@@ -1032,7 +1037,6 @@ function scheduleReconnect() {
     void connect();
   }, delay);
 }
-const AGENT_BRIDGE_PLATFORM = "opencli-sidebar";
 const AGENT_BRIDGE_EVENT_LIMIT = 200;
 const AGENT_BRIDGE_KEEPALIVE_MS = 2e4;
 const SIDEBAR_RUNTIME_STATE_KEY = "opencli_sidebar_runtime_v1";
@@ -1322,9 +1326,11 @@ function connectAgentBridge(config, force = false) {
   agentBridgeWs = socket;
   socket.onopen = () => {
     if (generation !== agentBridgeGeneration || socket !== agentBridgeWs) return;
+    const platform = resolveBridgePlatform(config);
+    const project = config.bridgeProject.trim();
     const registration = {
       type: "register",
-      platform: AGENT_BRIDGE_PLATFORM,
+      platform,
       capabilities: ["text", "preview", "typing"],
       metadata: {
         version: chrome.runtime.getManifest().version,
@@ -1333,7 +1339,7 @@ function connectAgentBridge(config, force = false) {
         device_id: config.deviceId || void 0
       }
     };
-    if (config.bridgeProject.trim()) registration.project = config.bridgeProject.trim();
+    if (project) registration.project = project;
     safeSend(socket, registration);
     startAgentBridgeKeepalive(socket);
   };

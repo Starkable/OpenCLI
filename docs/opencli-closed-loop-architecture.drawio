@@ -1,0 +1,63 @@
+<mxfile host="localhost">
+  <diagram id="mss3s3v7-vf75" name="Page-1">
+    <mxGraphModel dx="1546" dy="677" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="3" parent="1" style="rounded=1;fillColor=#F8FAFC;strokeColor=#CBD5E1;dashed=1;verticalAlign=top;spacingTop=8;fontStyle=1;fontColor=#64748B;fontSize=11;whiteSpace=wrap;html=1;" value="端侧" vertex="1">
+          <mxGeometry height="430" width="168" x="24" y="56" as="geometry" />
+        </mxCell>
+        <mxCell id="4" parent="1" style="rounded=1;fillColor=#F8FAFC;strokeColor=#CBD5E1;dashed=1;verticalAlign=top;spacingTop=8;fontStyle=1;fontColor=#64748B;fontSize=11;whiteSpace=wrap;html=1;" value="连接与接入" vertex="1">
+          <mxGeometry height="180" width="360" x="208" y="56" as="geometry" />
+        </mxCell>
+        <mxCell id="5" parent="1" style="rounded=1;fillColor=#F8FAFC;strokeColor=#CBD5E1;dashed=1;verticalAlign=top;spacingTop=8;fontStyle=1;fontColor=#64748B;fontSize=11;whiteSpace=wrap;html=1;" value="推理与指令通道" vertex="1">
+          <mxGeometry height="430" width="192" x="584" y="56" as="geometry" />
+        </mxCell>
+        <mxCell id="6" parent="1" style="rounded=1;fillColor=#DBEAFE;strokeColor=#2563EB;fontStyle=1;fontSize=12;fontColor=#1E3A8A;whiteSpace=wrap;html=1;" value="浏览器扩展&lt;br&gt;&lt;font style=&quot;font-size:10px;font-weight:normal;&quot;&gt;发起端 / 执行端&lt;/font&gt;" vertex="1">
+          <mxGeometry height="72" width="136" x="40" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="7" parent="1" style="rounded=1;fillColor=#E0E7FF;strokeColor=#4F46E5;fontStyle=1;fontSize=12;fontColor=#312E81;whiteSpace=wrap;html=1;" value="cc-connect&lt;br&gt;&lt;font style=&quot;font-size:10px;font-weight:normal;&quot;&gt;长连接 / 鉴权 / 路由&lt;/font&gt;" vertex="1">
+          <mxGeometry height="72" width="140" x="228" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="8" parent="1" style="rounded=1;fillColor=#EDE9FE;strokeColor=#7C3AED;fontStyle=1;fontSize=12;fontColor=#4C1D95;whiteSpace=wrap;html=1;" value="fsb_acp_adapter&lt;br&gt;&lt;font style=&quot;font-size:10px;font-weight:normal;&quot;&gt;策略 / 上下文 / 路由&lt;/font&gt;" vertex="1">
+          <mxGeometry height="72" width="148" x="400" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="9" parent="1" style="rounded=1;fillColor=#FEF3C7;strokeColor=#D97706;fontStyle=1;fontSize=12;fontColor=#92400E;whiteSpace=wrap;html=1;" value="FSB Agent&lt;br&gt;&lt;font style=&quot;font-size:10px;font-weight:normal;&quot;&gt;LLM 推理 / Function Call&lt;/font&gt;" vertex="1">
+          <mxGeometry height="72" width="152" x="604" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="10" parent="1" style="rounded=1;fillColor=#D1FAE5;strokeColor=#059669;fontStyle=1;fontSize=12;fontColor=#065F46;whiteSpace=wrap;html=1;" value="opencli&lt;br&gt;&lt;font style=&quot;font-size:10px;font-weight:normal;&quot;&gt;指令下发 / 页面操控&lt;/font&gt;" vertex="1">
+          <mxGeometry height="72" width="152" x="604" y="320" as="geometry" />
+        </mxCell>
+        <mxCell id="11" parent="1" style="rounded=1;fillColor=#EFF6FF;strokeColor=#93C5FD;fontSize=11;fontColor=#1E40AF;whiteSpace=wrap;html=1;" value="当前浏览器 Tab&lt;br&gt;&lt;font style=&quot;font-size:10px;font-weight:normal;&quot;&gt;DOM / 登录态 / 可见内容&lt;/font&gt;" vertex="1">
+          <mxGeometry height="64" width="136" x="40" y="400" as="geometry" />
+        </mxCell>
+        <mxCell id="12" edge="1" parent="1" source="6" style="edgeStyle=orthogonalEdgeStyle;endArrow=block;strokeWidth=2;strokeColor=#334155;fontSize=10;fontColor=#334155;exitX=1;exitY=0.5;entryX=0;entryY=0.5;html=1;" target="7" value="① 意图 + 精简上下文">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="13" edge="1" parent="1" source="7" style="edgeStyle=orthogonalEdgeStyle;endArrow=block;strokeWidth=2;strokeColor=#334155;fontSize=10;fontColor=#334155;exitX=1;exitY=0.5;entryX=0;entryY=0.5;html=1;" target="8" value="② 转发">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="14" edge="1" parent="1" source="8" style="edgeStyle=orthogonalEdgeStyle;endArrow=block;strokeWidth=2;strokeColor=#334155;fontSize=10;fontColor=#334155;exitX=1;exitY=0.5;entryX=0;entryY=0.5;html=1;" target="9" value="③ 接入路由">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="15" edge="1" parent="1" source="9" style="edgeStyle=orthogonalEdgeStyle;endArrow=block;strokeWidth=2;strokeColor=#334155;fontSize=10;fontColor=#334155;exitX=0.5;exitY=1;entryX=0.5;entryY=0;html=1;" target="10" value="④ Action 指令">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="16" edge="1" parent="1" source="10" style="edgeStyle=orthogonalEdgeStyle;endArrow=block;strokeWidth=2;strokeColor=#059669;fontSize=10;fontColor=#065F46;exitX=0;exitY=0.5;entryX=1;entryY=0.7;html=1;" target="6" value="⑤ 透传执行">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="190" y="356" />
+              <mxPoint x="190" y="170" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="17" edge="1" parent="1" source="6" style="edgeStyle=orthogonalEdgeStyle;endArrow=block;strokeWidth=2;strokeColor=#334155;fontSize=10;fontColor=#334155;dashed=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;html=1;" target="11" value="读写 / 操控">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="18" parent="1" style="text;align=left;fontSize=10;fontColor=#64748B;whiteSpace=wrap;html=1;" value="说明：用户自然语言由扩展发起，经网关与 ACP 进入 FSB Agent 推理；生成的结构化 Action 经 opencli 回传扩展，在当前 Tab 执行。" vertex="1">
+          <mxGeometry height="56" width="360" x="208" y="430" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

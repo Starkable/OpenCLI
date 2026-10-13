@@ -1,9 +1,12 @@
 /**
  * OpenCLI Side Panel — Chat UI + config for remote daemon / cc-connect Bridge.
  * Bridge protocol: https://github.com/chenhg5/cc-connect/blob/main/docs/bridge-protocol.md
+ *
+ * Bridge platform / session_key prefix MUST mirror extension/src/config.ts
+ * resolveBridgePlatform + buildBridgeSessionKey (sidepanel is not Vite-bundled).
  */
 
-const PLATFORM = 'opencli-sidebar';
+const DEFAULT_BRIDGE_PLATFORM = 'opencli-sidebar';
 const logEl = document.getElementById('log');
 const sendError = document.getElementById('sendError');
 const cfgError = document.getElementById('cfgError');
@@ -13,14 +16,19 @@ const daemonDot = document.getElementById('daemonDot');
 const daemonLabel = document.getElementById('daemonLabel');
 const bridgeDot = document.getElementById('bridgeDot');
 const bridgeLabel = document.getElementById('bridgeLabel');
+const targetDot = document.getElementById('targetDot');
+const targetStatus = document.getElementById('targetStatus');
+const targetTitle = document.getElementById('targetTitle');
+const targetUrl = document.getElementById('targetUrl');
 
-/** @type {WebSocket | null} */
-let bridgeWs = null;
 let bridgeRegistered = false;
+let bridgeState = 'disconnected';
+let lastBridgeEventSeq = 0;
+let sidebarTarget = { status: 'unbound', tabId: null, windowId: null, bindingEpoch: 0, taskId: null };
 /** @type {string} */
 let sessionUserId = 'local';
 /** @type {string} */
-let sessionKey = `${PLATFORM}:local:local`;
+let sessionKey = `${DEFAULT_BRIDGE_PLATFORM}:local:local`;
 let msgSeq = 0;
 let streamBuffer = '';
 
@@ -36,11 +44,21 @@ function sanitizeSessionSegment(value) {
   return raw.replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 64) || 'local';
 }
 
-/** Align Bridge session_key with deviceId (one device per user). */
+/** Same rule as resolveBridgePlatform in extension/src/config.ts */
+function resolveBridgePlatform(config) {
+  const project = String(config?.bridgeProject || '').trim();
+  return project || DEFAULT_BRIDGE_PLATFORM;
+}
+
+/**
+ * Align Bridge session_key with Project (platform) + deviceId.
+ * Format: {bridgeProject|opencli-sidebar}:{deviceId}:{deviceId}
+ */
 function applySessionIdentity(config) {
+  const platform = resolveBridgePlatform(config);
   const deviceId = sanitizeSessionSegment(config?.deviceId);
   sessionUserId = deviceId;
-  sessionKey = `${PLATFORM}:${deviceId}:${deviceId}`;
+  sessionKey = `${platform}:${deviceId}:${deviceId}`;
 }
 
 function setDaemonStatus(connected, reconnecting, mode, opts = {}) {
@@ -66,6 +84,7 @@ function setDaemonStatus(connected, reconnecting, mode, opts = {}) {
 }
 
 function setBridgeStatus(state, detail = '') {
+  bridgeState = state;
   const map = { connected: 'ok', connecting: 'warn', disconnected: 'bad', error: 'bad' };
   bridgeDot.className = `dot ${map[state] || 'bad'}`;
   const labels = {
@@ -75,6 +94,29 @@ function setBridgeStatus(state, detail = '') {
     error: 'Agent Bridge：错误',
   };
   bridgeLabel.textContent = `${labels[state] || labels.disconnected}${detail ? ` — ${detail}` : ''}`;
+}
+
+function renderSidebarTarget(target) {
+  sidebarTarget = target || sidebarTarget;
+  const state = sidebarTarget.status || 'unbound';
+  const labels = {
+    unbound: '操作目标：未绑定',
+    bound: '操作目标：已固定',
+    busy: '操作目标：执行中',
+    broken: '操作目标：已失效',
+  };
+  targetDot.className = `dot ${state === 'bound' ? 'ok' : state === 'busy' ? 'warn' : 'bad'}`;
+  targetStatus.textContent = labels[state] || labels.unbound;
+  targetTitle.textContent = sidebarTarget.title || (state === 'broken'
+    ? (sidebarTarget.error || '目标标签不可用，请重新绑定')
+    : '请在需要操作的页面绑定当前标签');
+  targetUrl.textContent = sidebarTarget.url || '';
+  const locked = state === 'busy';
+  const bindButton = document.getElementById('btnBind');
+  bindButton.textContent = state === 'unbound' ? '绑定当前标签' : '重新绑定当前标签';
+  bindButton.disabled = locked;
+  document.getElementById('btnUnbind').disabled = locked || state === 'unbound';
+  document.getElementById('btnSend').disabled = locked;
 }
 
 function sendMsg(type, payload = {}) {
@@ -107,8 +149,10 @@ async function loadConfigIntoForm() {
   document.getElementById('remoteToken').value = c.remoteToken || '';
   document.getElementById('bridgeUrl').value = c.bridgeUrl || '';
   document.getElementById('bridgeToken').value = c.bridgeToken || '';
+  document.getElementById('bridgeProject').value = c.bridgeProject || '';
   document.getElementById('preferBindActiveTab').checked = c.preferBindActiveTab !== false;
   applySessionIdentity(c);
+  return c;
 }
 
 function readFormConfig() {
@@ -120,92 +164,59 @@ function readFormConfig() {
     remoteToken: document.getElementById('remoteToken').value,
     bridgeUrl: document.getElementById('bridgeUrl').value.trim(),
     bridgeToken: document.getElementById('bridgeToken').value,
+    bridgeProject: document.getElementById('bridgeProject').value.trim(),
     preferBindActiveTab: document.getElementById('preferBindActiveTab').checked,
   };
 }
 
-function bridgeWsUrl(base, token) {
-  const u = new URL(base);
-  if (token) u.searchParams.set('token', token);
-  return u.toString();
-}
-
-function disconnectBridge() {
-  bridgeRegistered = false;
-  if (bridgeWs) {
-    try {
-      bridgeWs.close();
-    } catch {
-      // ignore
-    }
+function applyBridgeSnapshot(snapshot) {
+  if (!snapshot) return;
+  bridgeRegistered = snapshot.registered === true;
+  setBridgeStatus(snapshot.state || 'disconnected', snapshot.detail || '');
+  for (const event of snapshot.events || []) handleBridgeEvent(event);
+  if (Number.isFinite(snapshot.lastSeq)) {
+    lastBridgeEventSeq = Math.max(lastBridgeEventSeq, snapshot.lastSeq);
   }
-  bridgeWs = null;
-  setBridgeStatus('disconnected');
+  if (snapshot.target) renderSidebarTarget(snapshot.target);
 }
 
-function connectBridge(config) {
-  disconnectBridge();
+async function connectBridge(config, force = false) {
   applySessionIdentity(config);
   const url = (config.bridgeUrl || '').trim();
   if (!url) {
+    bridgeRegistered = false;
     setBridgeStatus('disconnected', '未配置 Bridge URL');
     return;
   }
   setBridgeStatus('connecting');
-  let ws;
   try {
-    ws = new WebSocket(bridgeWsUrl(url, config.bridgeToken || ''));
+    const snapshot = await sendMsg('connectAgentBridge', {
+      force,
+      afterSeq: lastBridgeEventSeq,
+    });
+    applyBridgeSnapshot(snapshot);
   } catch (err) {
     setBridgeStatus('error', err instanceof Error ? err.message : String(err));
-    return;
   }
-  bridgeWs = ws;
-
-  ws.onopen = () => {
-    ws.send(JSON.stringify({
-      type: 'register',
-      platform: PLATFORM,
-      capabilities: ['text', 'preview', 'typing'],
-      metadata: {
-        version: chrome.runtime.getManifest().version,
-        protocol_version: 1,
-        description: 'OpenCLI browser side panel',
-        device_id: config.deviceId || undefined,
-      },
-    }));
-  };
-
-  ws.onmessage = (ev) => {
-    let msg;
-    try {
-      msg = JSON.parse(ev.data);
-    } catch {
-      appendLog(`Bridge raw: ${String(ev.data).slice(0, 200)}`);
-      return;
-    }
-    handleBridgeMessage(msg, ws);
-  };
-
-  ws.onclose = () => {
-    if (bridgeWs === ws) {
-      bridgeWs = null;
-      bridgeRegistered = false;
-      setBridgeStatus('disconnected');
-    }
-  };
-
-  ws.onerror = () => {
-    setBridgeStatus('error', 'WebSocket error');
-  };
 }
 
-function handleBridgeMessage(msg, ws) {
+function handleBridgeEvent(event) {
+  if (!event || !Number.isFinite(event.seq) || event.seq <= lastBridgeEventSeq) return;
+  lastBridgeEventSeq = event.seq;
+  handleBridgeMessage(event.message || {});
+}
+
+function handleBridgeMessage(msg) {
   switch (msg.type) {
     case 'register_ack':
       if (msg.ok) {
         bridgeRegistered = true;
         setBridgeStatus('connected');
-        appendLog(`已注册到 cc-connect Bridge（session=${sessionKey}）`);
+        const proj = (document.getElementById('bridgeProject')?.value || '').trim();
+        const platform = resolveBridgePlatform({ bridgeProject: proj });
+        appendLog(
+          `已注册到 cc-connect Bridge（platform=${platform}, session=${sessionKey}${proj ? `, project=${proj}` : ''}）`,
+        );
       } else {
         bridgeRegistered = false;
         setBridgeStatus('error', msg.error || 'register rejected');
@@ -224,11 +235,13 @@ function handleBridgeMessage(msg, ws) {
       }
       break;
     case 'preview_start':
-      ws.send(JSON.stringify({
-        type: 'preview_ack',
-        ref_id: msg.ref_id,
-        preview_handle: `sp-${Date.now()}`,
-      }));
+      void sendMsg('sendAgentBridgePayload', {
+        payload: {
+          type: 'preview_ack',
+          ref_id: msg.ref_id,
+          preview_handle: `sp-${Date.now()}`,
+        },
+      });
       appendLog(msg.content || '…');
       break;
     case 'update_message':
@@ -241,19 +254,46 @@ function handleBridgeMessage(msg, ws) {
       break;
     case 'pong':
       break;
+    case 'raw':
+      appendLog(`Bridge raw: ${msg.content || ''}`);
+      break;
+    case 'user_message':
+      appendLog(`你: ${msg.content || ''}`);
+      break;
     default:
       appendLog(`Bridge ← ${msg.type || 'unknown'}`);
   }
 }
 
-async function maybeBindActiveTab(config) {
-  if (!config.preferBindActiveTab) return;
-  const result = await sendMsg('bindActiveTab', { session: 'sidebar' });
-  if (result?.ok) {
-    appendLog(`已绑定当前 tab → session=sidebar`);
-  } else {
-    appendLog(`绑定 tab 失败: ${result?.error || 'unknown'}（仍可发送任务）`);
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type === 'agentBridgeStatus') {
+    bridgeRegistered = msg.state === 'connected';
+    setBridgeStatus(msg.state || 'disconnected', msg.detail || '');
+  } else if (msg?.type === 'agentBridgeEvent') {
+    handleBridgeEvent(msg.event);
+  } else if (msg?.type === 'sidebarTargetStatus') {
+    const previous = sidebarTarget;
+    renderSidebarTarget(msg.target);
+    if (sidebarTarget.status === 'broken' && previous.status !== 'broken') {
+      appendLog(`目标标签已失效: ${sidebarTarget.error || sidebarTarget.errorCode || 'unknown'}`);
+    }
   }
+});
+
+async function bindCurrentTab() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id || !Number.isInteger(tab.windowId)) {
+    return { ok: false, error: '无法确定当前标签，请在普通网页上重试。' };
+  }
+  const result = await sendMsg('bindSidebarTarget', { tabId: tab.id, windowId: tab.windowId });
+  if (result?.ok) {
+    const target = result?.data?.target;
+    if (target) renderSidebarTarget(target);
+    appendLog(`已固定当前标签 → session=sidebar, tab=${tab.id}`);
+  } else {
+    appendLog(`绑定标签失败: ${result?.error || 'unknown'}`);
+  }
+  return result;
 }
 
 function assertRemoteBrowserReady(config) {
@@ -274,7 +314,7 @@ async function sendTask() {
   sendError.textContent = '';
   const text = document.getElementById('input').value.trim();
   if (!text) return;
-  if (!bridgeWs || bridgeWs.readyState !== WebSocket.OPEN || !bridgeRegistered) {
+  if (bridgeState !== 'connected' || !bridgeRegistered) {
     sendError.textContent = 'Agent Bridge 未就绪：请先在配置中填写 Bridge URL/Token 并保存';
     return;
   }
@@ -283,18 +323,28 @@ async function sendTask() {
   applySessionIdentity(config);
   if (!assertRemoteBrowserReady(config)) return;
 
-  await maybeBindActiveTab(config);
+  if (sidebarTarget.status === 'busy') {
+    sendError.textContent = '当前任务仍在操作已绑定标签，请等待完成或先停止任务';
+    return;
+  }
+  if (sidebarTarget.status !== 'bound') {
+    const bound = await bindCurrentTab();
+    if (!bound?.ok) {
+      sendError.textContent = bound?.error || '无法绑定当前标签';
+      return;
+    }
+  }
 
-  // Prefix helps Agent/skills pick OPENCLI_PROFILE when env injection is unavailable.
+  // Prefix helps Agent/skills select the device and the non-creating sidebar target policy.
   const deviceHint = config.deviceId?.trim()
     ? `[opencli-device:${config.deviceId.trim()}]\n`
     : '';
-  const content = `${deviceHint}${text}`;
+  const content = `${deviceHint}[opencli-browser-session:sidebar]\n[opencli-target-policy:bound-only]\n${text}`;
 
   msgSeq += 1;
   const msgId = `sp-${Date.now()}-${msgSeq}`;
   const replyCtx = msgId;
-  bridgeWs.send(JSON.stringify({
+  const payload = {
     type: 'message',
     msg_id: msgId,
     session_key: sessionKey,
@@ -302,19 +352,27 @@ async function sendTask() {
     chat_id: sessionUserId,
     content,
     reply_ctx: replyCtx,
-  }));
-  appendLog(`你: ${text}`);
+  };
+  const project = (config.bridgeProject || '').trim();
+  if (project) payload.project = project;
+  const sent = await sendMsg('sendAgentBridgePayload', { payload, displayText: text });
+  if (!sent?.ok) {
+    sendError.textContent = sent?.error || 'Agent Bridge 发送失败';
+    return;
+  }
   document.getElementById('input').value = '';
 }
 
-function stopTask() {
-  if (!bridgeWs || bridgeWs.readyState !== WebSocket.OPEN || !bridgeRegistered) {
+async function stopTask() {
+  if (bridgeState !== 'connected' || !bridgeRegistered) {
     sendError.textContent = 'Agent Bridge 未连接，无法停止';
     return;
   }
   msgSeq += 1;
   const msgId = `sp-stop-${Date.now()}`;
-  bridgeWs.send(JSON.stringify({
+  const cfgRes = await sendMsg('getRuntimeConfig');
+  const config = cfgRes?.config || {};
+  const payload = {
     type: 'message',
     msg_id: msgId,
     session_key: sessionKey,
@@ -322,8 +380,12 @@ function stopTask() {
     chat_id: sessionUserId,
     content: '/stop',
     reply_ctx: msgId,
-  }));
-  appendLog('已发送 /stop');
+  };
+  const project = (config.bridgeProject || '').trim();
+  if (project) payload.project = project;
+  const sent = await sendMsg('sendAgentBridgePayload', { payload });
+  if (sent?.ok) appendLog('已发送 /stop');
+  else sendError.textContent = sent?.error || 'Agent Bridge 发送失败';
 }
 
 document.getElementById('btnToggleCfg').addEventListener('click', () => {
@@ -350,15 +412,22 @@ document.getElementById('btnSaveCfg').addEventListener('click', async () => {
         return;
       }
     }
+    if (patch.bridgeUrl && !patch.bridgeProject) {
+      cfgError.textContent = '已配置 Bridge URL 时请填写 cc-connect Project 名称（多项目环境必填）';
+      return;
+    }
     const res = await sendMsg('saveRuntimeConfig', { patch });
     if (!res?.ok) {
       cfgError.textContent = '保存失败';
       return;
     }
     applySessionIdentity(res.config);
-    appendLog(`配置已保存；session_key=${sessionKey}；正在重连接线 / Bridge`);
+    const platform = resolveBridgePlatform(res.config);
+    appendLog(
+      `配置已保存；platform=${platform}；session_key=${sessionKey}；正在重连接线 / Bridge`,
+    );
     await refreshDaemonStatus();
-    connectBridge(res.config);
+    await connectBridge(res.config);
   } catch (err) {
     cfgError.textContent = err instanceof Error ? err.message : String(err);
   }
@@ -373,10 +442,16 @@ document.getElementById('btnReconnect').addEventListener('click', async () => {
 document.getElementById('btnSend').addEventListener('click', () => {
   void sendTask();
 });
-document.getElementById('btnStop').addEventListener('click', () => stopTask());
-document.getElementById('btnBind').addEventListener('click', async () => {
-  const result = await sendMsg('bindActiveTab', { session: 'sidebar' });
-  appendLog(result?.ok ? '绑定当前 tab 成功' : `绑定失败: ${result?.error || 'unknown'}`);
+document.getElementById('btnStop').addEventListener('click', () => void stopTask());
+document.getElementById('btnBind').addEventListener('click', () => void bindCurrentTab());
+document.getElementById('btnUnbind').addEventListener('click', async () => {
+  const result = await sendMsg('unbindSidebarTarget');
+  if (result?.ok) {
+    renderSidebarTarget(result?.data?.target);
+    appendLog('已解除固定标签');
+  } else {
+    appendLog(`解除绑定失败: ${result?.error || 'unknown'}`);
+  }
 });
 
 document.getElementById('input').addEventListener('keydown', (e) => {
@@ -387,23 +462,14 @@ document.getElementById('input').addEventListener('keydown', (e) => {
 });
 
 setInterval(() => {
-  if (bridgeWs && bridgeWs.readyState === WebSocket.OPEN && bridgeRegistered) {
-    try {
-      bridgeWs.send(JSON.stringify({ type: 'ping', ts: Date.now() }));
-    } catch {
-      // ignore
-    }
-  }
-}, 30000);
-
-setInterval(() => {
   void refreshDaemonStatus();
 }, 3000);
 
 void (async () => {
-  await loadConfigIntoForm();
+  const config = await loadConfigIntoForm();
+  const sidebarState = await sendMsg('getSidebarState');
+  if (sidebarState?.target) renderSidebarTarget(sidebarState.target);
   await refreshDaemonStatus();
-  const res = await sendMsg('getRuntimeConfig');
-  if (res?.config?.bridgeUrl) connectBridge(res.config);
+  if (config?.bridgeUrl) await connectBridge(config);
   appendLog('侧边栏已就绪。配置服务端设备凭证后即可发送任务。');
 })();
